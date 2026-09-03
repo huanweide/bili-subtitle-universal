@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.2
+// @version      8.1.3
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       阿梓 (AI 增强版)
 // @icon         https://www.bilibili.com/favicon.ico
@@ -483,17 +483,23 @@
   // ---------- YouTube ----------
   adapters.youtube = {
     id: 'youtube',
-    match: function () { return /(^|\.)youtube\.com$|youtu\.be/i.test(location.hostname); },
+    match: function () { return /(^|\.)youtube\.com$|youtube-nocookie\.com|youtu\.be/i.test(location.hostname); },
     resolve: async function () {
       var yt = window.ytInitialPlayerResponse || window.ytInitialData || {};
       var vd = yt.videoDetails || {};
       if (vd.videoId) state.videoId = vd.videoId;
+      // SPA 切视频后 ytInitialPlayerResponse 不刷新：以地址栏 ?v= 为准覆盖
+      var vm = location.pathname.match(/\/(?:watch|embed|shorts|live)\/([A-Za-z0-9_-]{11})/) || location.search.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+      if (vm) state.videoId = vm[1];
+      // playerResponse 与地址栏不一致 = 陈旧对象 → 其字幕轨道不可信（可能属于上个视频），丢弃
+      var stale = !!(vm && vd.videoId && vm[1] !== vd.videoId);
       if (vd.title) state.title = vd.title;
       if (vd.author) state.up = vd.author;
       if (vd.lengthSeconds) state.duration = Number(vd.lengthSeconds) || 0;
       if (!state.title) { try { state.title = document.title.replace(/\s*-\s*YouTube$/, '').trim(); } catch (e) {} }
       var cap = yt.captions && yt.captions.playerCaptionsTracklistRenderer;
       var tracks = (cap && cap.captionTracks) || [];
+      if (stale) tracks = [];   // 陈旧 playerResponse：不信任其字幕轨道
       var byLan = {};
       tracks.forEach(function (t) {
         var lan = t.languageCode || 'unknown';
@@ -774,6 +780,8 @@
     var elapsed = (Date.now() - state.asr.t0) / 1000;
     state.asr.eta = Math.round((elapsed / done) * Math.max(0, state.asr.total - done));
   }
+  var asrGen = 0;   // 世代号：SPA 切视频 +1，旧 ASR 任务据此判定过期（stale），不再污染新视频
+  function asrStop(myGen) { return myGen !== asrGen || !!(state.asr && state.asr.cancel); }
   function finishAsr() { state.asr = null; state.loading = false; cleanupAudio(); render(); }
 
   function cleanupAudio() {
@@ -783,6 +791,7 @@
   }
 
   async function runAsr() {
+    var myGen = asrGen;
     state.asrRan = true;
     if (!SETTINGS.sfKey) {
       state.err = '未配置硅基流动 API Key（⚙ 设置 → 填入 sk- 开头 Key，cloud.siliconflow.cn 获取）';
@@ -804,11 +813,11 @@
           : (ad.id === 'html5' ? '该视频使用流媒体播放，无法直接取音频（请改用带直链视频或官方字幕的页面）' : '该站点不支持音频转写');
         throw new Error(hint);
       }
-      if (state.asr && state.asr.cancel) { finishAsr(); return; }
+      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
       state.asr.phase = '下载音频'; state.asr.progress = 0; render();
       var blob = state.audioBlob || await downloadAudio(audioUrl);
       state.audioBlob = blob;
-      if (state.asr && state.asr.cancel) { finishAsr(); return; }
+      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
 
       var body = [];
 
@@ -837,7 +846,7 @@
             audioBuf = state.audioBuf || await decodeAudio(blob);
             state.audioBuf = audioBuf;
           } catch (eDec) {
-            if (state.asr && state.asr.cancel) { finishAsr(); return; }
+            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
             log('整体解码失败（' + decodeFailReason(eDec, blob) + '），自动降级播放录制', eDec);
             state.audioBuf = null; audioBuf = null;
             useRec = true;
@@ -860,7 +869,7 @@
         var nextStart = 0;
         var next = renderChunk(audioBuf, 0, Math.min(chunkDur, dur), 16000);
         for (var i2 = 0; i2 < chunks; i2++) {
-          if (state.asr && state.asr.cancel) break;
+          if (asrStop(myGen)) break;
           markChunk(i2, 'working');
           var rendered = await next;
           if (i2 + 1 < chunks) {
@@ -893,17 +902,16 @@
         }
       }
 
-      if (state.asr && state.asr.cancel) {
-        // 「保留已转写内容」要落到实处：先把已转好的片段写回界面与缓存
-        if (body.length) {
+      if (asrStop(myGen)) {
+        // 同代取消 → 「保留已转写内容」落到实处（写回界面+缓存）；stale（SPA 切视频）→ 旧视频结果一律丢弃
+        if (body.length && myGen === asrGen) {
           var mCancel = mergeBodies([{ body: body }]);
           mCancel.incomplete = true;
           state.body = mCancel;
           state.lan = 'ASR·取消';
           cache[ck] = mCancel;
         }
-        finishAsr();
-        toast(body.length ? ('已取消（保留已转写 ' + body.length + ' 句）') : '已取消');
+        if (myGen === asrGen) { finishAsr(); toast(body.length ? ('已取消（保留已转写 ' + body.length + ' 句）') : '已取消'); }
         return;
       }
       if (!body.length) throw new Error('转写结果为空');
@@ -917,7 +925,7 @@
       toast('已生成 ' + merged.length + ' 句转写字幕');
     } catch (e) {
       log(e);
-      if (state.asr && state.asr.cancel) { finishAsr(); return; }
+      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
       cleanupAudio();
       state.err = 'AI 转写失败：' + e.message;
       state.asr = null; state.loading = false; render();
@@ -926,7 +934,8 @@
 
   // 大文件分片重试：转写失败则对半拆小递归
   async function splitProcess(audioBuf, start, dur, depth) {
-    if (state.asr && state.asr.cancel) return [];
+    var myGen = asrGen;
+    if (asrStop(myGen)) return [];
     try {
       var rendered = await renderChunk(audioBuf, start, dur, 16000);
       var wav = wavFromBuffer(rendered);
@@ -965,7 +974,8 @@
   }
 
   async function recorderAsr(blob) {
-    if (state.asr && state.asr.cancel) return [];
+    var myGen = asrGen;
+    if (asrStop(myGen)) return [];
     var RATE = Math.max(1, Math.min(16, SETTINGS.asrPlayRate || 4));
     var chunkSecOrig = Math.min((SETTINGS.asrChunkMin || 10) * 60, 720); // 单片原时长 ≤12min，wav 体积受控
     var segsAll = [];
@@ -986,7 +996,7 @@
       audio.onerror = function () { clearTimeout(t); res(0); };
     });
     if (!(totalDur > 0)) { stopRecorder(); throw new Error('播放器无法读取该音频（格式不受支持或文件损坏）'); }
-    if (state.asr && state.asr.cancel) { stopRecorder(); return []; }
+    if (asrStop(myGen)) { stopRecorder(); return []; }
     if (typeof audio.captureStream !== 'function' && typeof audio.mozCaptureStream !== 'function' && typeof audio.msCaptureStream !== 'function') {
       stopRecorder(); throw new Error('当前浏览器不支持「播放录制」兜底，请用最新 Chrome / Edge');
     }
@@ -1050,11 +1060,11 @@
     consumerPromise = (async function () {
       try {
         while (true) {
-          if (state.asr && state.asr.cancel) break;
+          if (asrStop(myGen)) break;
           if (!pending.length) { if (stopNow) break; await sleep(120); continue; }
           var c = pending.shift();
           if (!c || c.samples.length < 8000) continue;   // <0.5s 忽略
-          if (state.asr && state.asr.cancel) break;
+          if (asrStop(myGen)) break;
           state.asr.phase = '🎙 播放录制转写（' + RATE + ' 倍速）'; state.asr.progress = null;
           render();
           var wav = pcm16kToWav(c.samples);
@@ -1062,7 +1072,7 @@
           try {
             txt = await transcribeWav(wav, 'rec.wav');
           } catch (e) {
-            if (state.asr && state.asr.cancel) break;   // 取消：本片丢弃
+            if (asrStop(myGen)) break;   // 取消/切视频：本片丢弃
             if (/(size|large|exceed|limit|too\s+(big|long)|文件大小|过大|过长)/i.test(e.message) && c.samples.length > 16000 * 60) {
               try {
                 var halfN = Math.floor(c.samples.length / 2);
@@ -1070,13 +1080,13 @@
                 var segY = await transcribeWav(pcm16kToWav(c.samples.subarray(halfN)), 'rec.wav');
                 txt = segX + '\n' + segY;
               } catch (e2) {
-                if (state.asr && state.asr.cancel) break;
+                if (asrStop(myGen)) break;
                 throw e2;
               }
             } else throw e;
           }
-          // 网络返回后再查一次取消：被取消的切片绝不混入结果、不刷新 UI
-          if (state.asr && state.asr.cancel) break;
+          // 网络返回后再查一次取消/切视频：被丢弃的切片绝不混入结果、不刷新 UI
+          if (asrStop(myGen)) break;
           var segs = parseSrt(txt);
           if (!segs.length) segs = splitTextByTime(txt, c.startOrig, c.startOrig + c.wavDur * c.kk);
           segs.forEach(function (s) { s.from = c.startOrig + s.from * c.kk; s.to = c.startOrig + s.to * c.kk; });
@@ -1097,16 +1107,16 @@
     try {
       await audio.play();
     } catch (e) {
-      if (state.asr && state.asr.cancel) { stopRecorder(); return []; }
+      if (asrStop(myGen)) { stopRecorder(); return []; }
       if (!/NotAllowed|play\(\)|autoplay/i.test(String(e && e.message || e))) throw e;
       state.asr.unlock = true; state.asr.phase = '🔇 浏览器拦截自动播放，请点击「解锁播放并继续」'; render();
       await new Promise(function (res) {
         recRef.unlockResolve = res;
         var iv = setInterval(function () {
-          if (state.asr && state.asr.cancel) { clearInterval(iv); if (recRef.unlockResolve === res) recRef.unlockResolve = null; res(); }
+          if (asrStop(myGen)) { clearInterval(iv); if (recRef.unlockResolve === res) recRef.unlockResolve = null; res(); }
         }, 200);
       });
-      if (state.asr && state.asr.cancel) { stopRecorder(); return []; }
+      if (asrStop(myGen)) { stopRecorder(); return []; }
     }
 
     state.asr.phase = '🎧 播放录制兜底中（' + RATE + ' 倍速，约 ' + Math.max(1, Math.round(totalDur / RATE / 60)) + ' 分钟，可最小化页面）';
@@ -1119,12 +1129,12 @@
       audio.onended = function () { naturalEnd = true; res(); };
       audio.onpause = function () {
         // 意外暂停（非取消、非自然结束）：尝试自动恢复一次
-        if (state.asr && state.asr.cancel) return;
+        if (asrStop(myGen)) return;
         if (naturalEnd || audio.ended) return;
         setTimeout(function () { audio.play().catch(function () {}); }, 0);
       };
       var iv = setInterval(function () {
-        if (state.asr && state.asr.cancel) { clearInterval(iv); res(); return; }
+        if (asrStop(myGen)) { clearInterval(iv); res(); return; }
         if (naturalEnd) { clearInterval(iv); res(); return; }
         if (audio.ended || audio.currentTime >= totalDur - 0.1) { naturalEnd = true; clearInterval(iv); res(); return; }
         var t = audio.currentTime;
@@ -1137,7 +1147,7 @@
     takeSlice();   // 收尾：不足一片的剩余音频
     stopNow = true;
     await consumerPromise;
-    if (consumerErr && !(state.asr && state.asr.cancel)) {
+    if (consumerErr && !asrStop(myGen)) {
       toast('⚠ 播放录制中途出错（' + (consumerErr.message || consumerErr) + '），已保留成功转写部分');
     }
     // 对账：极少数浏览器 captureStream 不跟随倍速导致时间轴整体偏差 → 线性修正
@@ -1186,11 +1196,12 @@
     });
   }
   async function translateBody(body) {
+    var myGen = asrGen;
     if (!SETTINGS.sfKey) throw new Error('翻译需要配置硅基流动 API Key');
     var targetName = LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo;
     var out = [], BATCH = 120;
     for (var i = 0; i < body.length; i += BATCH) {
-      if (state.asr && state.asr.cancel) break;
+      if (asrStop(myGen)) break;
       var batch = body.slice(i, i + BATCH);
       var prompt = '你是专业字幕翻译。把下面 JSON 数组里每条 content 翻译成' + targetName + '，要求：1) from/to 字段原样保留；2) 只翻译 content，不增删条目；3) 直接输出 JSON 数组，不要任何多余文字。\n' +
         JSON.stringify(batch.map(function (x) { return { from: x.from, to: x.to, content: x.content }; }));
@@ -1238,6 +1249,7 @@
       var ad = detectAdapter();
       if (!ad) { state.err = '未检测到视频（请在有视频的页面使用）'; state.loading = false; render(); return; }
       state.adapter = ad;
+      state.subs = [];   // 必须先清：SPA 站内切视频时旧字幕列表会残留，导致「张冠李戴」
       await ad.resolve();
 
       if (SETTINGS.asrForce) {
@@ -1271,6 +1283,7 @@
       }
     } catch (e) {
       log(e);
+      state.asr = null;   // 翻译/转写中途失败也要复位，避免界面卡在「翻译中」
       if (SETTINGS.asrFallback && !state.asrRan && !state.body) {
         state.err = '';
         await runAsr();
@@ -1591,6 +1604,7 @@
 
   // ===================== 启动 / 视频切换检测 =====================
   function resetForNewVideo() {
+    asrGen++;   // 使旧 ASR/翻译任务全部进入 stale：SPA 切视频后旧结果一律丢弃，不污染新视频
     if (state.asr) state.asr.cancel = true;
     cleanupAudio();
     state.adapter = null; state.cid = null; state.videoId = '';

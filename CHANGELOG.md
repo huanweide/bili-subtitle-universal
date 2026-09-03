@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 8.1.3 · SPA 切视频不再被旧 ASR 任务污染 + 翻译失败时 UI 不残留
+
+- **【修复】SPA 切换视频后旧转写"追尾"覆盖新视频**：B 站/YouTube 在不刷新页面的情况下切换视频（路由变了），旧 ASR 任务可能还在网络转写、转完会跑回 `state.body` + `cache[ck]`，把上一个视频的结果当成新视频的字幕——你切到新视频看到的还是老字幕。引入 `asrGen` 世代号机制：每次 `resetForNewVideo()` 触发就 `asrGen++`，所有旧任务每个取消/等待/循环点自查 `asrStop(myGen)`（= myGen !== asrGen 或用户取消）——过期则立刻脱身、丢弃旧结果、不调用 `finishAsr()`（避免清掉新任务的 UI）。21 个旧式 `state.asr && state.asr.cancel` 检查点全部改造为 `asrStop(myGen)`。
+- **【修复】字幕主流程翻译 `state.asr` 残留**：之前 `try` 失败回落到「读不到翻译 → 不当作错误」分支时 `state.asr` 没清，导致按钮一直转圈、UI 显示「转写中」却再无动作。现在失败分支统一清状态、出 toast。
+- **【修复】B 站 SPA 字幕张冠李戴**：`getSubtitles` 之前从不先清空 `state.subs`，切换视频后会用旧列表去拉新视频的字幕 → **拉回来的还是上个视频的内容**。`resolve()` 阶段先按适配器类型重置 `state.subs = []`。
+- **【修复】YouTube 嵌入页 `match` 漏域**：embed 常用 `youtube-nocookie.com` 之前识别不到。`resolve()` 现在以地址栏 `?v=` 为准覆盖 SPA 陈旧的 `videoDetails.videoId`，并清空过时字幕轨道。
+- **【测试】状态机模拟新增 SPA stale 路径**（`tests/recorder-sim.html`）：用 `bumpGen()` 模拟 `asrGen++`，验证旧 `recorderAsr` 在切视频场景下能静默丢弃、快速脱身。**7/7 PASS**（原 6 条 + 新 stale）。原 17 项灰度零回归，Node 单测 29/29 全绿。
+- **【底层】state 代理活引用**：`recorder-sim.html` 的 depCode 改为 Proxy，每次读写实时指向 `window.__simState`，保证用例中途改 `cancel` 立即生效。
+
 ## 8.1.2 · 取消「保留已转写内容」落到实处 + 播放录制状态机模拟器
 
 - **【修复】取消是假保留**：分片/录制转写中途点「✖ 取消」时，界面提示「已取消（保留已转写内容）」，但已转好的片段只存在局部变量、没写回界面与缓存——用户取消后实际什么都看不到。现在取消时把已转片段合并写回 `state.body` + 缓存（标注 `ASR·取消`），toast 明确「已取消（保留已转写 N 句）」。

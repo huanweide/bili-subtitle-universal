@@ -10,8 +10,8 @@ body{font-family:sans-serif;padding:20px;background:#f5f5f5}
 </head>
 <body>
 <h2>recorderAsr · 取消/暂停竞态状态机模拟（v8.1.1+）</h2>
-<p>此页 mock Web Audio / Audio / captureStream / 转写接口，在真实浏览器里驱动 recorderAsr 的 6 条路径：
-自然结束 / 中途取消 / 意外暂停自动恢复 / 停滞 5s 收尾 / 解锁成功放行 / 解锁阶段取消。任何一条卡死即 FAIL（防回归门）。</p>
+<p>此页 mock Web Audio / Audio / captureStream / 转写接口，在真实浏览器里驱动 recorderAsr 的 7 条路径：
+自然结束 / 中途取消 / 意外暂停自动恢复 / 停滞 5s 收尾 / 解锁成功放行 / 解锁阶段取消 / SPA 切视频 stale。任何一条卡死即 FAIL（防回归门）。</p>
 <div id="testResult">（测试运行中...）</div>
 
 <script>
@@ -155,6 +155,9 @@ Object.defineProperty(window.Audio.prototype, 'src', {
       'var SETTINGS = { asrPlayRate: 4, asrChunkMin: 0.02, sfKey: "sk-mock" };\n' +
       // live 代理：每次读写都指向 window.__simState，测试可随时改 cancel/phase（不能启动时绑死）
       'var state = new Proxy({}, { get: function (t, k) { return window.__simState ? window.__simState[k] : undefined; }, set: function (t, k, v) { if (window.__simState) window.__simState[k] = v; return true; } });\n' +
+      // 世代号机制（v8.1.3）：recorderAsr 依赖 asrGen/asrStop，必须在 depCode 提供
+      'var asrGen = 0;\n' +
+      'function asrStop(myGen) { return myGen !== asrGen || !!(state.asr && state.asr.cancel); }\n' +
       'var recRef = window.__simRecRef = { audio: null, actx: null, url: "", unlockResolve: null };\n' +
       'function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }\n' +
       'function log() {}\n' +
@@ -166,7 +169,7 @@ Object.defineProperty(window.Audio.prototype, 'src', {
       extractFunc(src, 'splitTextByTime') + '\n' +
       extractFunc(src, 'stopRecorder') + '\n' +
       extractFunc(src, 'recorderAsr');
-    var scope = new Function(depCode + '\n; return { recorderAsr: recorderAsr, stopRecorder: stopRecorder, recRef: recRef };')();
+    var scope = new Function(depCode + '\n; return { recorderAsr: recorderAsr, stopRecorder: stopRecorder, recRef: recRef, bumpGen: function () { asrGen++; } };')();
     return scope;
   }
 
@@ -288,6 +291,16 @@ Object.defineProperty(window.Audio.prototype, 'src', {
         S().asr.cancel = true;
         var segs = await pr;   // 必须在 200ms 轮询内脱身
         if (!Array.isArray(segs)) throw new Error('应返回数组');
+        return segs;
+      }, 6000);
+
+      // ---- 7. SPA 切视频（stale）：旧任务静默丢弃并快速脱身 ----
+      await runCase('切视频 stale：旧转写丢弃并快速脱身', async function (sc) {
+        var pr = sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        await timeout(600);
+        sc.bumpGen();   // 模拟 resetForNewVideo 里 asrGen++（SPA 切到新视频）
+        var segs = await pr;   // 旧任务必须在轮询内脱身（不卡死、不产出、不 toast）
+        if (!Array.isArray(segs)) throw new Error('应返回数组（旧结果丢弃）');
         return segs;
       }, 6000);
 

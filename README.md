@@ -113,7 +113,7 @@ decodeAudioData 一次性解码成 AudioBuffer
 ## 开发
 
 ```bash
-node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（32 项）
+node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（37 项，含 3H 边界 5 条）
 node tests/serve.js                      # 静态服务，端口 8765
 SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从 env 读 key，不入仓库）
 ```
@@ -124,7 +124,7 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从
 
 ## 版本
 
-当前 **8.1.6**（v8.1.6：设置面板加硅基流动邀请码卡片（axOmWfWi 一键复制 + 去注册领 ¥16 引导链接）+ 转写模型下拉下方邀请链接 + 面板底部 ReTri 作者水印与 GitHub star 引导 + `@author` 同步 ReTri + `.bsr-b` flex:1 让 footer 固定可见；真站验证 3.55H 无字幕视频 `BV1424U6JEGL` API subCount=0 正确触发 AI 转写兜底；门禁三连全绿：单测 32/32、灰度 17/17、状态机 7/7、UI DOM 渲染 + 复制 toast 断言通过。v8.1.5：YouTube 字幕时间戳解析修复——parseTtml 正则重写兼容 `<p begin/end>` 双时间格式 + vttTime 逗号毫秒兼容 + 导出 TXT/SRT 加 UTF-8 BOM；v8.1.4：设置漏存修复 + switchLan/bilibili resolve 补世代号守卫；v8.1.3：SPA 切视频后旧转写不再追尾污染新视频——asrGen 世代号机制 + 21 个取消点统一收口）。
+当前 **8.1.7**（v8.1.7：3H 超长音频边界修固——estimateDecodedMB 修 probeMime(null) bug + m4a 保守取 64kbps 防高码率漏判、shouldUseRecord 临界 >120MB 改 ≥120MB 防漏判 1 字节；自动更新元数据——头部补 @updateURL/@downloadURL（jsdelivr CDN 国内可读）+ @supportURL 让 Tampermonkey 自动检查更新用户免手动重装；新增 5 条 3H 边界 Node 单测（3.55H 195MB、3H 86MB、临界 120MB、10MB 安全小文件、estimateDecodedMB 195MB 估时长）单测总数 37/37。v8.1.6：设置面板加硅基流动邀请码卡片（axOmWfWi 一键复制 + 去注册领 ¥16 引导链接）+ 转写模型下拉下方邀请链接 + 面板底部 ReTri 作者水印与 GitHub star 引导 + `@author` 同步 ReTri + `.bsr-b` flex:1 让 footer 固定可见。v8.1.5：YouTube 字幕时间戳解析修复）。
 
 ## 许可证
 

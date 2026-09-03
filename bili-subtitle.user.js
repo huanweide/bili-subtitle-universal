@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.6
+// @version      8.1.7
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -23,6 +23,9 @@
 // @connect      googlevideo.com
 // @connect      *
 // @run-at       document-idle
+// @updateURL    https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js
+// @supportURL   https://github.com/huanweide/bili-subtitle-universal/issues
 // ==/UserScript==
 
 (function () {
@@ -682,9 +685,12 @@
   // 预估「整体解码后」的 PCM 占用，超阈值就避免 decode（防 OOM 整页崩溃）
   function estimateDecodedMB(blob) {
     try {
-      var real = probeMime(null);
-      // 从字节数按保守码率估时长：m4a 平均 ~96kbps=12KB/s，webm/ogg 更高取 8KB/s 保守
-      var bytesPerSec = (real === 'audio/webm' || real === 'audio/ogg') ? 8000 : 12000;
+      // probeMime 接收 ArrayBuffer 探测；这里根据 blob.type 估码率更稳（同步可执行）
+      var t = (blob.type || '').toLowerCase();
+      var bytesPerSec;
+      if (t.indexOf('webm') >= 0 || t.indexOf('ogg') >= 0) bytesPerSec = 8000;   // webm/ogg ~64kbps
+      else if (t.indexOf('mpeg') >= 0 || t.indexOf('mp3') >= 0) bytesPerSec = 16000; // mp3 ~128kbps
+      else bytesPerSec = 8000;   // m4a/aac/未知：保守取 64kbps 防 128-192kbps 高码率漏判 → 3H 漏走 record
       var durSec = blob.size / bytesPerSec;
       // PCM Float32 最坏 48kHz 双声道 = 48k*2*4 = 384KB/s
       var pcmMB = durSec * 384 / 1024;
@@ -694,8 +700,8 @@
   function shouldUseRecord(blob) {
     if (SETTINGS.asrLongMode === 'record') return true;
     if (SETTINGS.asrLongMode === 'decode') return false;
-    // auto：预估解码后 >1GB 或源文件 >120MB 就走播放录制，避免整页内存崩溃
-    if (blob.size > 120 * 1024 * 1024) return true;
+    // auto：预估解码后 >1GB 或源文件 >=120MB 就走播放录制，避免整页内存崩溃（临界用 >= 防漏判 1 字节）
+    if (blob.size >= 120 * 1024 * 1024) return true;
     return estimateDecodedMB(blob) > 1024;
   }
   function decodeFailReason(e, blob) {

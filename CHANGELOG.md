@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 8.1.7 · 3H 超长音频边界修固 + 自动更新元数据
+
+- **【修复】estimateDecodedMB 理论隐患**：旧实现 `probeMime(null)` 永远返 null（`new Uint8Array(null, ...)` 抛错被吞），导致 `bytesPerSec` 永远 12000。改成基于 `blob.type` 真实判定：webm/ogg 取 8000、mpeg 取 16000、**m4a/aac/未知取 8000 保守码率**，防 128-192kbps 高码率 3H 长视频漏判 `record` 兜底（漏判会走 decode → 浏览器 OOM）。
+- **【修复】shouldUseRecord 临界 1 字节漏判**：源文件 >120MB 改 ≥120MB（严格临界用 `>=`），防 120MB 整边界走到 decode 路径。
+- **【新增】自动更新元数据**：脚本头部补 `@updateURL / @downloadURL`（jsdelivr CDN `cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js`，国内可读）+ `@supportURL`（GitHub issues 页）。Tampermonkey 现可自动检查更新，用户免手动重装——这是 v8.1.6 推广版最大盲点（你装机脚本后我推新版你不会收到提示）。
+- **【测试】Node 单测 37/37**（原 32 + 新增 5 条 3H 边界）：3.55H m4a 128kbps (~195MB) auto 走录制、3H m4a 64kbps (~86MB) auto 走录制（防高码率漏判）、临界 120MB m4a auto 走录制、10MB m4a auto 不走录制、estimateDecodedMB 195MB m4a 估时长远超 3.55H（保守防漏判）。浏览器灰度 17/17、状态机 7/7 零回归。
+
 ## 8.1.6 · 硅基流动邀请码卡片 + ReTri 作者水印 + 邀请链接引导注册
 
 - **【新增】设置面板「邀请码卡片」**：API Key 输入框下方新增橘色虚线卡片，文案「用 GitHub 注册『硅基流动』送 ¥16 代金券，跑 AI 转写完全够用」，配 **axOmWfWi 邀请码一键复制按钮**（点击弹 toast「邀请码已复制：axOmWfWi」）+ 「去注册领 ¥16 →」跳转链接 `https://cloud.siliconflow.cn/i/axOmWfWi`。已 curl 验证链接 307 重定向可达。

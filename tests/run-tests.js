@@ -176,6 +176,31 @@ test('estimateDecodedMB 随字节增长', () => {
   assert.ok(m1 > 100 && m1 < 2000, '6MB 预估应合理，实际 ' + m1 + 'MB');
   assert.ok(m2 > m1 * 5, '120MB 预估应远大于 6MB（' + m1 + ' vs ' + m2 + '）');
 });
+test('shouldUseRecord: 3.55H m4a 128kbps (~195MB) auto 走录制', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  assert.strictEqual(scope.shouldUseRecord({ size: 195 * 1024 * 1024, type: 'audio/mp4' }), true);
+});
+test('shouldUseRecord: 3H m4a 64kbps (~86MB) auto 走录制（防高码率漏判）', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  // 86MB m4a 按 8KB/s 保守码率估 durSec = 86*1024*1024/8000 ≈ 11264s ≈ 3.13H
+  // pcmMB ≈ 11264 * 384 / 1024 ≈ 4225MB > 1GB → 走录制
+  assert.strictEqual(scope.shouldUseRecord({ size: 86 * 1024 * 1024, type: 'audio/mp4' }), true);
+});
+test('shouldUseRecord: 临界 120MB m4a auto 走录制（>= 临界）', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  assert.strictEqual(scope.shouldUseRecord({ size: 120 * 1024 * 1024, type: 'audio/mp4' }), true);
+});
+test('shouldUseRecord: 10MB m4a auto 不走录制（小文件安全解码）', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  // 10MB m4a 按 8KB/s 估 durSec ≈ 1310s ≈ 21.8min → pcmMB ≈ 491MB < 1GB → 不走录制
+  assert.strictEqual(scope.shouldUseRecord({ size: 10 * 1024 * 1024, type: 'audio/mp4' }), false);
+});
+test('estimateDecodedMB: 195MB m4a 估时长远超 3.55H（保守防漏判）', () => {
+  // 195MB m4a 按 8KB/s 估 durSec = 25559s ≈ 7.1H（保守估比真实高，符合防漏判原则）
+  // pcmMB ≈ 25559 * 384 / 1024 ≈ 9585MB > 5000MB 阈值
+  const m = scope.estimateDecodedMB({ size: 195 * 1024 * 1024, type: 'audio/mp4' });
+  assert.ok(m > 5000, '195MB m4a 预估 PCM 应 > 5000MB（实际 ' + m + '）');
+});
 test('shouldUseRecord: auto 小文件不录制', () => {
   scope.SETTINGS.asrLongMode = 'auto';
   assert.strictEqual(scope.shouldUseRecord({ size: 2 * 1024 * 1024 }), false);

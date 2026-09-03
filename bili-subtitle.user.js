@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.3
+// @version      8.1.4
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       阿梓 (AI 增强版)
 // @icon         https://www.bilibili.com/favicon.ico
@@ -56,6 +56,8 @@
     asrLang: GM_getValue('bsr_asr_lang', 'auto'),
     asrChunkMin: GM_getValue('bsr_asr_chunk', 20),
     asrModel: GM_getValue('bsr_asr_model', 'FunAudioLLM/SenseVoiceSmall'),
+    asrLongMode: GM_getValue('bsr_asr_longmode', 'auto'),
+    asrPlayRate: GM_getValue('bsr_asr_playrate', 4),
     translateTo: GM_getValue('bsr_translate_to', 'none'),
     translateModel: GM_getValue('bsr_translate_model', 'Qwen/Qwen2.5-72B-Instruct')
   };
@@ -371,6 +373,7 @@
     id: 'bilibili',
     match: function () { return /^https?:\/\/(www\.)?bilibili\.com\/(video\/BV|bangumi\/play\/)/i.test(location.href); },
     resolve: async function () {
+      var myGen = asrGen;   // 世代号：SPA 切视频后旧请求返回时不污染新视频 state（与 runAsr/switchLan 同一机制）
       var st = window.__INITIAL_STATE__ || {};
       try {
         if (st.videoData) {
@@ -392,6 +395,7 @@
       if (state.bvid) {
         try {
           var pl = JSON.parse(await gx('https://api.bilibili.com/x/player/pagelist?bvid=' + state.bvid, { timeout: 8000, retries: 1, referer: 'https://www.bilibili.com/' }));
+          if (myGen !== asrGen) return false;
           if (pl.code === 0 && pl.data && pl.data.length) {
             state.totalPages = pl.data.length;
             var idx = Math.min(Math.max(state.page - 1, 0), pl.data.length - 1);
@@ -403,9 +407,10 @@
               if (pg.duration) state.duration = Number(pg.duration) || state.duration;
             }
           }
-        } catch (e) { log('pagelist 失败', e); }
+        } catch (e) { if (myGen !== asrGen) return false; log('pagelist 失败', e); }
         try {
           var vd = JSON.parse(await gx('https://api.bilibili.com/x/web-interface/view?bvid=' + state.bvid, { timeout: 8000, retries: 1, referer: 'https://www.bilibili.com/' }));
+          if (myGen !== asrGen) return false;
           if (vd.code === 0 && vd.data) {
             var d = vd.data;
             if (!state.aid && d.aid) state.aid = d.aid;
@@ -414,11 +419,12 @@
             if (!state.desc && d.desc) state.desc = d.desc;
             if (!state.duration && d.duration) state.duration = Number(d.duration) || 0;
           }
-        } catch (e) { log('view API 失败', e); }
+        } catch (e) { if (myGen !== asrGen) return false; log('view API 失败', e); }
       } else if (!state.cid && st.epInfo && st.epInfo.cid) {
         state.cid = st.epInfo.cid;
         if (!state.aid && st.epInfo.aid) state.aid = st.epInfo.aid;
       }
+      if (myGen !== asrGen) return false;
       return !!state.cid;
     },
     fetchSubs: async function () {
@@ -1577,19 +1583,23 @@
   }
 
   async function switchLan(lan) {
+    var myGen = asrGen;   // 世代号：SPA 切视频后旧翻译/字幕结果不污染新视频（与 runAsr 同一机制）
     state.loading = true; render();
     try {
       await fetchBody(lan);
+      if (asrStop(myGen)) return;   // 切视频：丢弃旧字幕结果
       if (SETTINGS.translateTo !== 'none' && !sameLang(lan, SETTINGS.translateTo)) {
         state.asr = { phase: '翻译中', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null };
         render();
         var t = await translateBody(state.body);
+        if (asrStop(myGen)) return;   // 切视频：丢弃旧翻译结果
         if (t) { state.body = t; state.lan = lan + ' → ' + (LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo); }
         state.asr = null;
       }
+      if (asrStop(myGen)) return;
       state.loading = false; render();
     } catch (e) {
-      log(e); state.err = '切换语言失败：' + e.message; state.loading = false; render();
+      log(e); if (!asrStop(myGen)) { state.err = '切换语言失败：' + e.message; state.loading = false; render(); }
     }
   }
 

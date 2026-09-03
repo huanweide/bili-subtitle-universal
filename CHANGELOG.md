@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 8.1.4 · 设置漏存修复 + switchLan/bilibili resolve 补世代号守卫
+
+- **【修复】v8.1 新增的两个设置字段刷新即丢**：`asrLongMode`（超长视频策略）与 `asrPlayRate`（播放录制倍速）只有 `GM_setValue` 保存、`SETTINGS` 初始化却从没 `GM_getValue` 读回——用户改完设置刷新页面就全部重置回默认值。现在初始化读回，配置真正持久化。
+- **【修复】switchLan 缺世代号守卫（v8.1.3 同款病根的漏网）**：切换翻译语言是异步链路，中途 SPA 切换视频后，旧翻译返回会写回新视频的 `state.body` + 覆盖 `state.lan`。函数首捕获 `myGen = asrGen`，翻译写回前自查 `asrStop(myGen)`——过期则静默丢弃，只写 UI 不加锁。
+- **【修复】bilibili resolve 异步返回污染（SPA 追尾最后一处）**：bilibili resolve 内含 2 个 `await gx`（pagelist + view API），旧 resolve 异步返回会把旧视频的 title/cid/pageTitle 塞进已重置的新 state。现在函数首捕获 `myGen`，两处 `await gx` 返回后先查 staleness（`myGen !== asrGen` 直接短路跳过写入）；从 `window.__INITIAL_STATE__` 取的同步数据也被包裹在同一守卫内。youtube 已在 v8.1.3 修过，html5 是同步 resolve 无风险——至此三个适配器的 SPA 污染源全部封死。
+- **【测试】**：原 17 项灰度 17/17 零回归；状态机模拟（含 SPA stale 路径）7/7 PASS；Node 单测 29/29 全绿。截图 `tests/screenshot-sim-v814.png` 留档。
+
 ## 8.1.3 · SPA 切视频不再被旧 ASR 任务污染 + 翻译失败时 UI 不残留
 
 - **【修复】SPA 切换视频后旧转写"追尾"覆盖新视频**：B 站/YouTube 在不刷新页面的情况下切换视频（路由变了），旧 ASR 任务可能还在网络转写、转完会跑回 `state.body` + `cache[ck]`，把上一个视频的结果当成新视频的字幕——你切到新视频看到的还是老字幕。引入 `asrGen` 世代号机制：每次 `resetForNewVideo()` 触发就 `asrGen++`，所有旧任务每个取消/等待/循环点自查 `asrStop(myGen)`（= myGen !== asrGen 或用户取消）——过期则立刻脱身、丢弃旧结果、不调用 `finishAsr()`（避免清掉新任务的 UI）。21 个旧式 `state.asr && state.asr.cancel` 检查点全部改造为 `asrStop(myGen)`。

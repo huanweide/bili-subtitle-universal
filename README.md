@@ -107,7 +107,7 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从
 
 ## 版本
 
-当前 **8.1.3**（v8.1.3：SPA 切视频后旧转写不再追尾污染新视频——asrGen 世代号机制 + 21 个取消点统一收口；翻译失败时 UI 不残留；B 站/YouTube 适配器修复切视频字幕张冠李戴；状态机模拟器新增 SPA stale 路径 7/7 PASS）。
+当前 **8.1.4**（v8.1.4：设置漏存修复（刷新即丢）+ switchLan/bilibili resolve 补世代号守卫，三个适配器 SPA 污染源全封死；v8.1.3：SPA 切视频后旧转写不再追尾污染新视频——asrGen 世代号机制 + 21 个取消点统一收口；翻译失败时 UI 不残留；B 站/YouTube 适配器修复切视频字幕张冠李戴；状态机模拟器新增 SPA stale 路径 7/7 PASS）。
 
 ## 许可证
 

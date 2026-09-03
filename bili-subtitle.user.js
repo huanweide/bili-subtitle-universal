@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.0
+// @version      8.1.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       阿梓 (AI 增强版)
 // @icon         https://www.bilibili.com/favicon.ico
@@ -940,7 +940,7 @@
   var recRef = { audio: null, actx: null, url: '', unlockResolve: null };
   function stopRecorder() {
     var r = recRef;
-    try { if (r.audio) { r.audio.onended = null; r.audio.pause(); try { r.audio.src = ''; } catch (e) {} } } catch (e) {}
+    try { if (r.audio) { r.audio.onended = null; r.audio.onpause = null; r.audio.pause(); try { r.audio.src = ''; } catch (e) {} } } catch (e) {}
     try { if (r.actx) { r.actx.close(); } } catch (e) {}
     if (r.url) { try { URL.revokeObjectURL(r.url); } catch (e) {} }
     if (r.unlockResolve) { var u = r.unlockResolve; r.unlockResolve = null; u(); }
@@ -988,7 +988,7 @@
     var inTotal = 0, gOut = 0, monoIn = new Float32Array(16384);
     var outParts = [], outLen = 0, outBlk = null, outBlkN = 0;
     var sliceAt = Math.max(16000, Math.round(chunkSecOrig / RATE * 16000 * 0.98)); // 攒到该样本数切一片
-    var cursorOrig = 0, lastUi = 0, naturalEnd = false, stopNow = false, pending = [], consumerPromise = null;
+    var cursorOrig = 0, lastUi = 0, naturalEnd = false, stopNow = false, pending = [], consumerPromise = null, consumerErr = null;
 
     function takeSlice() {
       if (!outLen) return;
@@ -1050,14 +1050,21 @@
           try {
             txt = await transcribeWav(wav, 'rec.wav');
           } catch (e) {
-            if (state.asr && state.asr.cancel) break;
+            if (state.asr && state.asr.cancel) break;   // 取消：本片丢弃
             if (/(size|large|exceed|limit|too\s+(big|long)|文件大小|过大|过长)/i.test(e.message) && c.samples.length > 16000 * 60) {
-              var halfN = Math.floor(c.samples.length / 2);
-              var segX = await transcribeWav(pcm16kToWav(c.samples.subarray(0, halfN)), 'rec.wav');
-              var segY = await transcribeWav(pcm16kToWav(c.samples.subarray(halfN)), 'rec.wav');
-              txt = segX + '\n' + segY;
+              try {
+                var halfN = Math.floor(c.samples.length / 2);
+                var segX = await transcribeWav(pcm16kToWav(c.samples.subarray(0, halfN)), 'rec.wav');
+                var segY = await transcribeWav(pcm16kToWav(c.samples.subarray(halfN)), 'rec.wav');
+                txt = segX + '\n' + segY;
+              } catch (e2) {
+                if (state.asr && state.asr.cancel) break;
+                throw e2;
+              }
             } else throw e;
           }
+          // 网络返回后再查一次取消：被取消的切片绝不混入结果、不刷新 UI
+          if (state.asr && state.asr.cancel) break;
           var segs = parseSrt(txt);
           if (!segs.length) segs = splitTextByTime(txt, c.startOrig, c.startOrig + c.wavDur * c.kk);
           segs.forEach(function (s) { s.from = c.startOrig + s.from * c.kk; s.to = c.startOrig + s.to * c.kk; });
@@ -1066,7 +1073,11 @@
           state.asr.total = Math.max(state.asr.total || 1, state.asr.done);
           render();
         }
-      } catch (e) { log('录制转写消费者异常', e); }
+      } catch (e) {
+        // 记录真实失败原因，交给主流程提示（不静默吞掉半截结果）
+        consumerErr = e;
+        log('录制转写消费者异常', e);
+      }
     })();
 
     // 启动播放（处理自动播放拦截：给一个解锁按钮）
@@ -1077,7 +1088,12 @@
       if (state.asr && state.asr.cancel) { stopRecorder(); return []; }
       if (!/NotAllowed|play\(\)|autoplay/i.test(String(e && e.message || e))) throw e;
       state.asr.unlock = true; state.asr.phase = '🔇 浏览器拦截自动播放，请点击「解锁播放并继续」'; render();
-      await new Promise(function (res) { recRef.unlockResolve = res; });
+      await new Promise(function (res) {
+        recRef.unlockResolve = res;
+        var iv = setInterval(function () {
+          if (state.asr && state.asr.cancel) { clearInterval(iv); if (recRef.unlockResolve === res) recRef.unlockResolve = null; res(); }
+        }, 200);
+      });
       if (state.asr && state.asr.cancel) { stopRecorder(); return []; }
     }
 
@@ -1085,18 +1101,33 @@
     state.asr.total = Math.max(1, Math.ceil(totalDur / chunkSecOrig)); state.asr.done = 0;
     render();
 
-    // 等播放结束或用户取消
+    // 等播放结束或用户取消（含停滞/意外暂停兜底，避免任何路径永久挂起）
     await new Promise(function (res) {
+      var lastT = -1, stallN = 0;
       audio.onended = function () { naturalEnd = true; res(); };
+      audio.onpause = function () {
+        // 意外暂停（非取消、非自然结束）：尝试自动恢复一次
+        if (state.asr && state.asr.cancel) return;
+        if (naturalEnd || audio.ended) return;
+        setTimeout(function () { audio.play().catch(function () {}); }, 0);
+      };
       var iv = setInterval(function () {
-        if (state.asr && state.asr.cancel) { clearInterval(iv); res(); }
+        if (state.asr && state.asr.cancel) { clearInterval(iv); res(); return; }
+        if (naturalEnd) { clearInterval(iv); res(); return; }
+        if (audio.ended || audio.currentTime >= totalDur - 0.1) { naturalEnd = true; clearInterval(iv); res(); return; }
+        var t = audio.currentTime;
+        if (Math.abs(t - lastT) < 0.01) { stallN++; if (stallN >= 20) { naturalEnd = true; clearInterval(iv); res(); } }
+        else { stallN = 0; }
+        lastT = t;
       }, 250);
-      audio.onpause = function () { if (state.asr && state.asr.cancel) { clearInterval(iv); res(); } };
     });
     try { proc.disconnect(); srcNode.disconnect(); } catch (e) {}
     takeSlice();   // 收尾：不足一片的剩余音频
     stopNow = true;
     await consumerPromise;
+    if (consumerErr && !(state.asr && state.asr.cancel)) {
+      toast('⚠ 播放录制中途出错（' + (consumerErr.message || consumerErr) + '），已保留成功转写部分');
+    }
     // 对账：极少数浏览器 captureStream 不跟随倍速导致时间轴整体偏差 → 线性修正
     if (naturalEnd && segsAll.length && cursorOrig > totalDur * 0.5 && Math.abs(totalDur / cursorOrig - 1) > 0.05) {
       var scale = totalDur / cursorOrig;
@@ -1418,7 +1449,13 @@
     root.querySelector('#bsrAsrBtn').onclick = function () { runAsr(); };
     root.querySelector('#bsrUnlock').onclick = function () {
       var a = recRef.audio;
-      if (a) { a.play().then(function () { if (state.asr) state.asr.unlock = false; render(); }).catch(function () { toast('仍被拦截，请点击页面空白处后重试'); }); }
+      if (!a) return;
+      a.play().then(function () {
+        if (state.asr) state.asr.unlock = false;
+        render();
+        // 放行 recorderAsr 中等待解锁的 Promise（不释放则转写永久挂起）
+        if (recRef.unlockResolve) { var u = recRef.unlockResolve; recRef.unlockResolve = null; u(); }
+      }).catch(function () { toast('仍被拦截，请点击页面空白处后重试'); });
     };
     root.querySelector('#bsrSetToggle').onclick = function () { root.querySelector('#bsrSetBox').classList.toggle('show'); };
     root.querySelector('#bsrEye').onclick = function () {

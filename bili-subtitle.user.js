@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.1
+// @version      8.1.2
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       阿梓 (AI 增强版)
 // @icon         https://www.bilibili.com/favicon.ico
@@ -893,7 +893,19 @@
         }
       }
 
-      if (state.asr && state.asr.cancel) { finishAsr(); toast('已取消（保留已转写内容）'); return; }
+      if (state.asr && state.asr.cancel) {
+        // 「保留已转写内容」要落到实处：先把已转好的片段写回界面与缓存
+        if (body.length) {
+          var mCancel = mergeBodies([{ body: body }]);
+          mCancel.incomplete = true;
+          state.body = mCancel;
+          state.lan = 'ASR·取消';
+          cache[ck] = mCancel;
+        }
+        finishAsr();
+        toast(body.length ? ('已取消（保留已转写 ' + body.length + ' 句）') : '已取消');
+        return;
+      }
       if (!body.length) throw new Error('转写结果为空');
       var merged = mergeBodies([{ body: body }]);
       merged.incomplete = false;

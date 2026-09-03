@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>播放录制通道 · 状态机模拟测试</title>
+<style>
+body{font-family:sans-serif;padding:20px;background:#f5f5f5}
+#testResult{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;margin-top:20px;font-family:monospace;font-size:13px;white-space:pre-wrap;line-height:1.7}
+</style>
+</head>
+<body>
+<h2>recorderAsr · 取消/暂停竞态状态机模拟（v8.1.1+）</h2>
+<p>此页 mock Web Audio / Audio / captureStream / 转写接口，在真实浏览器里驱动 recorderAsr 的 6 条路径：
+自然结束 / 中途取消 / 意外暂停自动恢复 / 停滞 5s 收尾 / 解锁成功放行 / 解锁阶段取消。任何一条卡死即 FAIL（防回归门）。</p>
+<div id="testResult">（测试运行中...）</div>
+
+<script>
+// ===== Mock GM API =====
+window.__GM = { values: {} };
+window.GM_getValue = function (k, d) { return (k in window.__GM.values) ? window.__GM.values[k] : d; };
+window.GM_setValue = function (k, v) { window.__GM.values[k] = v; };
+window.GM_download = function () {};
+window.GM_xmlhttpRequest = function (opts) {
+  if (opts && opts.onerror) setTimeout(function () { opts.onerror(new Error('mock: 网络请求被桩拦截')); }, 0);
+};
+
+// ===== Mock Web Audio 硬件面（可控状态机） =====
+window.__simState = null;   // 被注入的 state（测试读写 cancel/phase/unlock）
+window.__simAudio = null;   // 最近创建的 Audio
+window.__proc = null;       // 最近创建的 ScriptProcessor（测试喂数据）
+window.__simDur = 8;        // 预设音频时长
+window.__blockPlay = false; // true → play() 抛 NotAllowedError（模拟自动播放拦截）
+window.__noAutoAdvance = false; // true → 播放不推进 currentTime（模拟停滞）
+
+window.__unlock = function () {
+  // 等价真实「▶ 解锁播放并继续」按钮 handler：解除拦截 + play + 放行等待者
+  window.__blockPlay = false;
+  if (window.__simAudio) window.__simAudio.play().catch(function () {});
+  var sim = window.__simState;
+  var rec = window.__simRecRef;
+  if (rec && rec.unlockResolve) { var u = rec.unlockResolve; rec.unlockResolve = null; u(); }
+};
+
+function __sine(n) {
+  var a = new Float32Array(n);
+  for (var i = 0; i < n; i++) a[i] = Math.sin(i / 100) * 0.5;
+  return a;
+}
+window.__makeEv = function (n) {
+  var s = __sine(n);
+  return { inputBuffer: { numberOfChannels: 2, getChannelData: function () { return s; } } };
+};
+
+window.AudioContext = function () {
+  var self = this;
+  this.sampleRate = 48000;
+  this.createMediaStreamSource = function () { return { disconnect: function () {} }; };
+  this.createScriptProcessor = function () {
+    var p = { onaudioprocess: null, disconnect: function () {} };
+    window.__proc = p;
+    return p;
+  };
+  this.close = function () {};
+};
+
+window.Audio = function () {
+  var self = this;
+  this.currentTime = 0; this.playbackRate = 1; this.paused = true; this.ended = false;
+  this.duration = 0; this.src = '';
+  this.__playCalls = 0;
+  window.__simAudio = self;   // 供用例取最近实例
+  this.captureStream = function () { return {}; };
+  this.__tickIv = null;
+  this.play = function () {
+    self.__playCalls++;
+    return new Promise(function (res, rej) {
+      if (window.__blockPlay) {
+        var e = new DOMException('play() failed because the user didn\'t interact with the document first.', 'NotAllowedError');
+        rej(e); return;
+      }
+      self.paused = false;
+      if (self.__tickIv) clearInterval(self.__tickIv);
+      self.__tickIv = setInterval(function () {
+        if (self.paused || self.ended) return;
+        if (window.__noAutoAdvance) return;
+        self.currentTime += 0.04 * self.playbackRate;
+        if (self.currentTime >= self.duration) {
+          self.currentTime = self.duration; self.ended = true;
+          clearInterval(self.__tickIv);
+          if (self.onended) self.onended();
+        }
+      }, 40);
+      res();
+    });
+  };
+  this.pause = function () {
+    self.paused = true;
+    if (self.__tickIv) { clearInterval(self.__tickIv); self.__tickIv = null; }
+    if (self.onpause) setTimeout(function () { self.onpause(); }, 0);
+  };
+};
+
+// src 赋值后模拟 onloadedmetadata（不用原生 setter，避免 Illegal invocation）
+Object.defineProperty(window.Audio.prototype, 'src', {
+  get: function () { return this.__srcVal; },
+  set: function (v) {
+    this.__srcVal = v;
+    var self = this;
+    setTimeout(function () {
+      self.duration = window.__simDur;
+      if (self.onloadedmetadata) self.onloadedmetadata();
+    }, 10);
+  }
+});
+</script>
+
+<script src="/bili-subtitle.user.js"></script>
+
+<script>
+(function () {
+  var out = document.getElementById('testResult');
+  var results = [];
+  function log(t) { results.push(t); out.textContent = results.join('\n'); }
+  function pass(t) { log('PASS  ' + t); }
+  function fail(t) { log('FAIL  ' + t); }
+
+  function extractFunc(src, name) {
+    var re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{');
+    var m = src.match(re);
+    if (!m) throw new Error('未找到函数 ' + name);
+    var i = src.indexOf('{', m.index);
+    var depth = 0, j = i;
+    for (; j < src.length; j++) {
+      var c = src[j];
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (!depth) break; }
+    }
+    return src.slice(m.index, j + 1);
+  }
+
+  function fetchSrc() {
+    return new Promise(function (res, rej) {
+      var x = new XMLHttpRequest();
+      x.open('GET', '/bili-subtitle.user.js?t=' + Date.now());
+      x.onload = function () { res(x.responseText); };
+      x.onerror = rej;
+      x.send();
+    });
+  }
+
+  // ===== 构造 recorderAsr 可运行 scope =====
+  // 注入 mock 依赖 + 真实纯函数（括号配对提取），new Function 拼装
+  function buildScope(src) {
+    var depCode =
+      'var SETTINGS = { asrPlayRate: 4, asrChunkMin: 0.02, sfKey: "sk-mock" };\n' +
+      // live 代理：每次读写都指向 window.__simState，测试可随时改 cancel/phase（不能启动时绑死）
+      'var state = new Proxy({}, { get: function (t, k) { return window.__simState ? window.__simState[k] : undefined; }, set: function (t, k, v) { if (window.__simState) window.__simState[k] = v; return true; } });\n' +
+      'var recRef = window.__simRecRef = { audio: null, actx: null, url: "", unlockResolve: null };\n' +
+      'function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }\n' +
+      'function log() {}\n' +
+      'function render() {}\n' +
+      'async function transcribeWav(blob, name) { return "1\\n00:00:00,000 --> 00:00:01,000\\n模拟转写文本\\n\\n"; }\n' +
+      extractFunc(src, 'wavFromBuffer') + '\n' +
+      extractFunc(src, 'pcm16kToWav') + '\n' +
+      extractFunc(src, 'parseSrt') + '\n' +
+      extractFunc(src, 'splitTextByTime') + '\n' +
+      extractFunc(src, 'stopRecorder') + '\n' +
+      extractFunc(src, 'recorderAsr');
+    var scope = new Function(depCode + '\n; return { recorderAsr: recorderAsr, stopRecorder: stopRecorder, recRef: recRef };')();
+    return scope;
+  }
+
+  // ===== 通用用例壳：重置 + 喂数据 + 超时护栏 =====
+  function freshState() {
+    return { asrRan: true, asr: { phase: '', done: 0, total: 0, cancel: false, progress: null, chunks: [], eta: 0, t0: Date.now(), unlock: false } };
+  }
+  function timeout(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  var feedIv = null;
+  function startFeed() {
+    feedIv = setInterval(function () {
+      if (window.__proc && window.__proc.onaudioprocess) {
+        try { window.__proc.onaudioprocess(window.__makeEv(4800)); } catch (e) {}
+      }
+    }, 40);
+  }
+  function stopFeed() { if (feedIv) { clearInterval(feedIv); feedIv = null; } }
+
+  async function runCase(name, fn, limitMs) {
+    window.__simState = freshState();
+    window.__simAudio = null; window.__proc = null;
+    window.__simDur = 8; window.__blockPlay = false; window.__noAutoAdvance = false;
+    // 清 recRef 字段（不能换对象——scope 闭包引用同一个）；unlockResolve 残留会串到下一用例
+    if (window.__simRecRef) { window.__simRecRef.audio = null; window.__simRecRef.actx = null; window.__simRecRef.url = ''; window.__simRecRef.unlockResolve = null; }
+    var scope = null;
+    try {
+      scope = window.__scope;
+      startFeed();
+      var p = Promise.resolve().then(function () { return fn(scope); });
+      var r = await Promise.race([
+        p.then(function (v) { return { ok: true, v: v }; }),
+        timeout(limitMs || 14000).then(function () { return { ok: false, err: '超时 ' + ((limitMs || 14000) / 1000) + 's（疑似卡死）' }; })
+      ]);
+      stopFeed();
+      if (r.ok) { pass(name + ' ✓'); return r.v; }
+      fail(name + ' ✗ —— ' + r.err);
+      return null;
+    } catch (e) {
+      stopFeed();
+      fail(name + ' ✗ —— 异常 ' + e.message);
+      return null;
+    }
+  }
+
+  // ===== 主测试 =====
+  (async function () {
+    try {
+      var src = await fetchSrc();
+      window.__scope = buildScope(src);
+      var S = function () { return window.__simState; };
+      var A = function () { return window.__simAudio; };
+
+      // ---- 1. 自然播放到结尾 ----
+      var r1 = await runCase('自然结束：播到结尾自动收尾并返回内容', async function (sc) {
+        var segs = await sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        if (!segs || !segs.length) throw new Error('返回空字幕（预期至少 1 片转写）');
+        if (S().asr && S().asr.phase && S().asr.phase.indexOf('兜底中') === 0) throw new Error('结束后 phase 未复位');
+        if (window.__simRecRef.audio !== null) throw new Error('stopRecorder 未清理 audio');
+        return segs;
+      });
+      if (r1) log('   · 返回 ' + r1.length + ' 句，audio 已清理');
+
+      // ---- 2. 中途取消 ----
+      await runCase('中途取消：立即脱身不卡死', async function (sc) {
+        var pr = sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        await timeout(600);
+        S().asr.cancel = true;
+        var segs = await pr;
+        if (!Array.isArray(segs)) throw new Error('应返回数组');
+        return segs;
+      });
+
+      // ---- 3. 意外暂停自动恢复 ----
+      await runCase('意外暂停：自动恢复播放并正常收尾', async function (sc) {
+        var pr = sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        await timeout(500);
+        var a = A();
+        if (!a || a.paused) throw new Error('audio 未在播放');
+        var callsBefore = a.__playCalls;
+        a.pause();   // 意外暂停（非取消）
+        await timeout(400);
+        if (a.__playCalls <= callsBefore) throw new Error('未自动恢复播放');
+        if (a.paused) throw new Error('pause 后仍未恢复');
+        var segs = await pr;   // 继续播到结尾
+        if (!Array.isArray(segs)) throw new Error('应返回数组');
+        return segs;
+      });
+
+      // ---- 4. 停滞 5s 收尾 ----
+      await runCase('停滞收尾：currentTime 不动 5s 自动收尾', async function (sc) {
+        window.__noAutoAdvance = true;
+        var t0 = Date.now();
+        var segs = await sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        var cost = (Date.now() - t0) / 1000;
+        if (cost < 3.5) throw new Error('收尾过快（' + cost + 's），停滞检测未生效');
+        return segs;
+      }, 16000);
+
+      // ---- 5. 解锁成功放行 ----
+      await runCase('解锁成功：按钮放行后继续转写直至完成', async function (sc) {
+        window.__blockPlay = true;
+        var pr = sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        await timeout(400);
+        if (!S().asr.unlock) throw new Error('未进入 unlock 状态');
+        var resolvedEarly = await Promise.race([pr.then(function () { return true; }), timeout(800).then(function () { return false; })]);
+        if (resolvedEarly) throw new Error('unlock 等待被意外提前放行');
+        window.__unlock();   // 模拟点解锁按钮
+        var segs = await pr;
+        if (!segs || !segs.length) throw new Error('解锁后未产出字幕');
+        return segs;
+      });
+
+      // ---- 6. 解锁阶段取消 ----
+      await runCase('解锁取消：拦截态点取消立即脱身', async function (sc) {
+        window.__blockPlay = true;
+        var pr = sc.recorderAsr(new Blob(['x'], { type: 'audio/mp4' }));
+        await timeout(400);
+        if (!S().asr.unlock) throw new Error('未进入 unlock 状态');
+        S().asr.cancel = true;
+        var segs = await pr;   // 必须在 200ms 轮询内脱身
+        if (!Array.isArray(segs)) throw new Error('应返回数组');
+        return segs;
+      }, 6000);
+
+      log('\n========== recorderAsr 状态机模拟全部结束 ==========');
+    } catch (e) {
+      log('FATAL  ' + e.message);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

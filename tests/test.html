@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>字幕提取 · 灰度测试</title>
+<style>
+body{font-family:sans-serif;padding:20px;background:#f5f5f5}
+#testResult{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;margin-top:20px;font-family:monospace;font-size:13px;white-space:pre-wrap;line-height:1.7}
+</style>
+</head>
+<body>
+<h2>全网字幕提取 · 灰度测试页</h2>
+<p>此页 mock 了 GM API 并内联加载脚本，用于验证「UI 渲染」与「修复后的音频管线（decodeAudioData + 同上下文 OfflineAudioContext）」。</p>
+<video id="testVideo" controls style="width:320px" src="data:video/mp4;base64,"></video>
+<div id="testResult">（测试运行中...）</div>
+
+<script>
+// ===== Mock GM API（必须在脚本之前） =====
+window.__GM = { values: {} };
+window.GM_getValue = function (k, d) { return (k in window.__GM.values) ? window.__GM.values[k] : d; };
+window.GM_setValue = function (k, v) { window.__GM.values[k] = v; };
+window.GM_download = function () {};
+window.GM_xmlhttpRequest = function (opts) {
+  if (opts && opts.onerror) setTimeout(function () { opts.onerror(new Error('mock: 网络请求被桩拦截')); }, 0);
+};
+</script>
+
+<script src="/bili-subtitle.user.js"></script>
+
+<script>
+(function () {
+  var out = document.getElementById('testResult');
+  var results = [];
+  function log(t) { results.push(t); out.textContent = results.join('\n'); }
+  function pass(t) { log('PASS  ' + t); }
+  function fail(t) { log('FAIL  ' + t); }
+
+  // 从源码提取函数（括号配对，测真实代码）
+  function extractFunc(src, name) {
+    var re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{');
+    var m = re.exec(src);
+    if (!m) throw new Error('未找到函数 ' + name);
+    var start = m.index + m[0].length - 1, depth = 0, i = start;
+    for (; i < src.length; i++) { if (src[i] === '{') depth++; else if (src[i] === '}') { depth--; if (depth === 0) break; } }
+    return src.slice(m.index, i + 1);
+  }
+
+  async function run() {
+    try {
+      // 等待脚本 boot（DOMContentLoaded）
+      await new Promise(function (r) { if (document.readyState === 'complete') r(); else document.addEventListener('DOMContentLoaded', r, { once: true }); });
+      await new Promise(function (r) { setTimeout(r, 600); });
+
+      // 测试 1：UI 渲染
+      var fab = document.getElementById('bsr-fab');
+      if (fab) pass('UI 渲染：悬浮按钮已出现'); else fail('UI 未渲染：悬浮按钮不存在');
+      if (document.getElementById('bsr-panel')) pass('UI 渲染：面板 DOM 已创建'); else fail('面板未创建');
+
+      // 测试 2：音频管线（从真实源码提取 renderChunk/wavFromBuffer/decodeAudio）
+      var src = await fetch('/bili-subtitle.user.js').then(function (r) { return r.text(); });
+      var code = extractFunc(src, 'decodeAudio') + '\n' + extractFunc(src, 'renderChunk') + '\n' + extractFunc(src, 'wavFromBuffer');
+      var scope = new Function(code + '\n; return { decodeAudio: decodeAudio, renderChunk: renderChunk, wavFromBuffer: wavFromBuffer };')();
+
+      // 2.1 生成 2 秒 440Hz 正弦（44.1kHz 双声道）
+      var ctx = new OfflineAudioContext(2, 88200, 44100);
+      var osc = ctx.createOscillator(); osc.frequency.value = 440;
+      var gain = ctx.createGain(); gain.gain.value = 0.5;
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(0); osc.stop(2);
+      var buf = await ctx.startRendering();
+      pass('合成音频：时长=' + buf.duration.toFixed(2) + 's，声道=' + buf.numberOfChannels + '，采样率=' + buf.sampleRate);
+
+      // 2.2 WAV 编码 → decodeAudioData 解码
+      var wavBlob = scope.wavFromBuffer(buf);
+      pass('WAV 编码：大小=' + wavBlob.size + ' 字节');
+      var decoded = await scope.decodeAudio(wavBlob);
+      pass('decodeAudioData：解码成功，时长=' + decoded.duration.toFixed(2) + 's');
+
+      // 2.3 分片重采样（关键修复点：同上下文，不应报 cross-context 错误）
+      var chunk = await scope.renderChunk(decoded, 0.5, 1.0, 16000);
+      if (!chunk) throw new Error('renderChunk 返回空');
+      pass('renderChunk：16kHz 单声道重采样成功，时长=' + chunk.duration.toFixed(2) + 's，采样率=' + chunk.sampleRate + '，声道=' + chunk.numberOfChannels);
+
+      // 2.4 分片转 WAV
+      var chunkWav = scope.wavFromBuffer(chunk);
+      pass('分片 WAV：大小=' + chunkWav.size + ' 字节（预期约 44+16000*2=32044）');
+
+      // 2.5 能量校验（非静音）
+      var d = chunk.getChannelData(0), sum = 0;
+      for (var k = 0; k < d.length; k += 100) sum += Math.abs(d[k]);
+      if (sum > 0) pass('能量校验：分片非静音（正弦能量=' + sum.toFixed(2) + '）'); else fail('能量校验：分片为静音');
+
+      pass('>>> 音频管线端到端通过，无 cross-context 错误 <<<');
+    } catch (e) {
+      fail('异常：' + (e && e.message ? e.message : e));
+      console.error(e);
+    }
+  }
+  run();
+})();
+</script>
+</body>
+</html>

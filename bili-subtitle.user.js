@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.5
+// @version      8.1.6
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
-// @author       阿梓 (AI 增强版)
+// @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -1321,6 +1321,12 @@
   }
 
   // ===================== 复制 / 下载 =====================
+  function copyInviteCode() {
+    var code = 'axOmWfWi';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(function () { toast('邀请码已复制：' + code); }, function () { fallbackCopy(code, function () { toast('邀请码已复制：' + code); }); });
+    } else fallbackCopy(code, function () { toast('邀请码已复制：' + code); });
+  }
   function copyText(txt) {
     if (!txt) return;
     var done = function () { toast('已复制 ' + txt.replace(/\s/g, '').length + ' 字'); };
@@ -1361,7 +1367,7 @@
       '#bsr-panel.show{display:flex}' +
       '.bsr-h{display:flex;align-items:center;gap:8px;padding:12px 14px;background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;font-weight:700;font-size:14px}' +
       '.bsr-h .x{margin-left:auto;cursor:pointer;font-weight:400;opacity:.9}' +
-      '.bsr-b{padding:12px 14px;overflow:auto}' +
+      '.bsr-b{flex:1;min-height:0;padding:12px 14px;overflow:auto}' +
       '.bsr-title{font-size:12px;color:#888;margin-bottom:8px;line-height:1.4;max-height:34px;overflow:hidden}' +
       '.bsr-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}' +
       '.bsr-sel{flex:1;min-width:120px;padding:6px 8px;border:1px solid #eee;border-radius:8px;font-size:12px}' +
@@ -1387,6 +1393,19 @@
       '.bsr-setbox .chk{display:flex;align-items:center;gap:6px;color:#555;margin-top:8px}' +
       '.bsr-setbox .chk input{width:auto}' +
       '.bsr-setbox input[type=password],.bsr-setbox input[type=text],.bsr-setbox select{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #eee;border-radius:8px;font-size:12px}' +
+      '.bsr-inv{margin:10px 0 4px;padding:8px 10px;background:linear-gradient(135deg,#fff5e6,#ffe9f2);border:1px dashed #ff9a3c;border-radius:8px;font-size:11px;line-height:1.5}' +
+      '.bsr-inv-t{color:#a05a00;margin-bottom:6px}' +
+      '.bsr-inv-t b{color:#e06a00}' +
+      '.bsr-inv-r{display:flex;gap:8px;align-items:center}' +
+      '.bsr-inv-code{flex:1;background:#ff9a3c;color:#fff;border:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}' +
+      '.bsr-inv-code:hover{background:#e88a2a}' +
+      '.bsr-inv-go{display:inline-block;background:#7C5CBF;color:#fff;text-decoration:none;border-radius:6px;padding:5px 8px;font-size:11px;font-weight:600;white-space:nowrap}' +
+      '.bsr-inv-go:hover{background:#6a4cab}' +
+      '.bsr-model-note{font-size:10px;color:#a05a00;margin:2px 0 0;line-height:1.5}' +
+      '.bsr-model-note a{color:#3a8ee6}' +
+      '.bsr-credit{text-align:center;font-size:10px;color:#aaa;padding:6px 0 2px;border-top:1px solid #f5f5f5;background:#fff}' +
+      '.bsr-credit a{color:#7C5CBF;text-decoration:none;font-weight:600}' +
+      '.bsr-credit a:hover{text-decoration:underline}' +
       '.bsr-keywrap{position:relative}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-save{width:100%;margin-top:10px;background:#7C5CBF}' +
@@ -1425,6 +1444,13 @@
       '        <input type="password" id="bsrKey" placeholder="sk-..." autocomplete="off" />' +
       '        <span class="eye" id="bsrEye">👁</span>' +
       '      </div>' +
+      '      <div class="bsr-inv">' +
+      '        <div class="bsr-inv-t">🎁 新用户福利：用 GitHub 注册「硅基流动」送 <b>¥16 代金券</b>，跑 AI 转写完全够用</div>' +
+      '        <div class="bsr-inv-r">' +
+      '          <button type="button" class="bsr-inv-code" id="bsrInviteCopy">📋 邀请码 axOmWfWi（点击复制）</button>' +
+      '          <a class="bsr-inv-go" href="https://cloud.siliconflow.cn/i/axOmWfWi" target="_blank" rel="noopener">去注册领 ¥16 →</a>' +
+      '        </div>' +
+      '      </div>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrOn" /> 无字幕时自动 AI 语音转写</label>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrFb" /> 字幕获取失败时自动转写</label>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrForce" /> 始终使用音频转写（无视自带字幕）</label>' +
@@ -1442,6 +1468,7 @@
       '        <option value="FunAudioLLM/SenseVoiceSmall">SenseVoiceSmall（推荐·快）</option>' +
       '        <option value="FunAudioLLM/SenseVoiceLarge">SenseVoiceLarge（更准）</option>' +
       '      </select>' +
+      '      <div class="bsr-model-note">由「硅基流动」驱动 · <a href="https://cloud.siliconflow.cn/i/axOmWfWi" target="_blank" rel="noopener">GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）</a></div>' +
       '      <label>分片时长（长视频转写）</label>' +
       '      <select id="bsrChunk">' +
       '        <option value="5">5 分钟/片</option>' +
@@ -1485,6 +1512,7 @@
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
+      '  <div class="bsr-credit">ReTri 出品 · 开源免费 · <a href="https://github.com/huanweide/bili-subtitle-universal" target="_blank" rel="noopener">GitHub ⭐ 好用点个 Star</a></div>' +
       '</div>' +
       '<div id="bsr-toast"></div>';
     document.body.appendChild(root);
@@ -1513,6 +1541,7 @@
       var k = root.querySelector('#bsrKey');
       k.type = (k.type === 'password') ? 'text' : 'password';
     };
+    root.querySelector('#bsrInviteCopy').onclick = copyInviteCode;
     root.querySelector('#bsrSaveSet').onclick = function () {
       SETTINGS.sfKey = root.querySelector('#bsrKey').value.trim();
       SETTINGS.asrEnable = root.querySelector('#bsrAsrOn').checked;

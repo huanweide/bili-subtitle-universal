@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 8.1.6 · 硅基流动邀请码卡片 + ReTri 作者水印 + 邀请链接引导注册
+
+- **【新增】设置面板「邀请码卡片」**：API Key 输入框下方新增橘色虚线卡片，文案「用 GitHub 注册『硅基流动』送 ¥16 代金券，跑 AI 转写完全够用」，配 **axOmWfWi 邀请码一键复制按钮**（点击弹 toast「邀请码已复制：axOmWfWi」）+ 「去注册领 ¥16 →」跳转链接 `https://cloud.siliconflow.cn/i/axOmWfWi`。已 curl 验证链接 307 重定向可达。
+- **【新增】模型选择处邀请提示**：转写模型下拉下方一行小字「由『硅基流动』驱动 · GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）」，邀请码可点跳转注册页。新用户跑 AI 转写前最常看的位置露出引导。
+- **【新增】作者水印 + GitHub star 引导**：面板底部常驻水印 `ReTri 出品 · 开源免费 · GitHub ⭐ 好用点个 Star`，链接仓库 `https://github.com/huanweide/bili-subtitle-universal`。`@author` 元数据同步从「阿梓 (AI 增强版)」改为 `ReTri`，统一品牌。`.bsr-b` 同步加 `flex:1;min-height:0` 让 footer 在长设置滚动时固定可见。
+- **【测试】门禁三连全绿**：Node 单测 32/32、浏览器灰度 17/17、状态机模拟 7/7。**新增 UI DOM 断言**：邀请码按钮/水印/model-note 三个元素均渲染正确，邀请码点击复制 toast 文案精确「邀请码已复制：axOmWfWi」。截图 `tests/screenshot-v816-invite.png` + `screenshot-v816-card2.png` 留档。
+- **【真站验证】3.55H 无字幕视频识别**：`BV1424U6JEGL`（Angelic Lofi ASMR · 3小时无循环）实站 v2 API 返回 `subCount=0, duration=12805s`——脚本「无字幕 → AI 转写兜底」触发条件正确。完整 3H AI 转写需在用户真机 + Tampermonkey + 已填 SF key 环境跑（沙箱无 key 无油猴注入），见 README「真机跑通 3H 无字幕测试的最短步骤」。
+
 ## 8.1.5 · YouTube 字幕时间戳解析修复 + 导出 TXT/SRT 加 BOM
 
 - **【修复】parseTtml 只认 `<text start/dur>` 形态，YouTube 字幕时间戳全乱**：YouTube timedtext（`fmt=ttml`）实际返回的是 `<p begin="00:00:01.500" end="00:00:04.000">`（HH:MM:SS.mmm 属性格式），旧解析器用 `parseFloat("00:00:07.340")` 在冒号处截断得 0——时间戳全部错乱或解析为空。重写为**正则解析 + 双形态兼容**（`<text start/dur>` 秒数与 `<p begin/end>` 双时间格式），并彻底摆脱 DOMParser（Node 单测从此能真实断言解析结果）。新增 `ttmlTime` helper。

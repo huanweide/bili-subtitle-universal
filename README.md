@@ -86,6 +86,23 @@ decodeAudioData 一次性解码成 AudioBuffer
 
 整段 ≤ 40MB 还可走「整段直传」捷径（不解码直接传原始 m4a 给模型）。
 
+## 真机跑通 3H 无字幕测试的最短步骤（沙箱无法跑，给你真机 5 分钟能验完）
+
+1. **拿 SF Key**：用 GitHub 一键登录 [cloud.siliconflow.cn/i/axOmWfWi](https://cloud.siliconflow.cn/i/axOmWfWi) 注册（自动送 ¥16 代金券，转写完全够用），进控制台复制 `sk-...`。
+2. **装脚本**：Tampermonkey 新建脚本，粘贴 `bili-subtitle.user.js` 全文保存。
+3. **填 Key**：打开任意 B 站视频页 → 右下 🎬 → ⚙ 设置 → 粘贴 `sk-...` → 保存。
+4. **找测试视频**：搜「3 小时 ASMR / 直播录像」选一个无字幕的（参考验证过的 `BV1424U6JEGL` · 3.55H · Angelic Lofi ASMR）。
+5. **触发转写**：点 ⚡ 获取字幕 → 看到「本视频无字幕」→ 点 🎙 AI 转写。
+6. **验收「不乱码真实字幕」**：
+   - 进度条走完「下载音频 → 录制兜底 → 转写分片」约 13 分钟（16 倍速播放）。
+   - 输出区出现中文字幕 + SRT 时间戳对齐真实音频（不是 `????`、不是 `00:00:00` 全堆一起）。
+   - 复制 / 下载 TXT / SRT 三个按钮可用 → 打开 TXT/SRT 用记事本看中文不乱码（v8.1.5 BOM 已修）。
+7. **失败怎么办**：
+   - 「未配置 Key」：回步骤 3。
+   - 「SiliconFlow 401」：Key 过期或填错，重填。
+   - 「音频下载失败」：视频用了 MSE 流（直播协议），换一个视频。
+   - 「字幕时间戳全 0」：升级到 ≥ v8.1.5，已修。
+
 ## 常见问题
 
 - **提示「未配置硅基流动 API Key」**：去 cloud.siliconflow.cn 注册拿 `sk-...` 填到设置里。
@@ -96,7 +113,7 @@ decodeAudioData 一次性解码成 AudioBuffer
 ## 开发
 
 ```bash
-node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（29 项）
+node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（32 项）
 node tests/serve.js                      # 静态服务，端口 8765
 SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从 env 读 key，不入仓库）
 ```
@@ -107,7 +124,7 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从
 
 ## 版本
 
-当前 **8.1.5**（v8.1.5：YouTube 字幕时间戳解析修复——parseTtml 正则重写兼容 `<p begin/end>` 双时间格式 + vttTime 逗号毫秒兼容 + 导出 TXT/SRT 加 UTF-8 BOM；v8.1.4：设置漏存修复 + switchLan/bilibili resolve 补世代号守卫；v8.1.3：SPA 切视频后旧转写不再追尾污染新视频——asrGen 世代号机制 + 21 个取消点统一收口；翻译失败时 UI 不残留；B 站/YouTube 适配器修复切视频字幕张冠李戴；状态机模拟器新增 SPA stale 路径 7/7 PASS）。
+当前 **8.1.6**（v8.1.6：设置面板加硅基流动邀请码卡片（axOmWfWi 一键复制 + 去注册领 ¥16 引导链接）+ 转写模型下拉下方邀请链接 + 面板底部 ReTri 作者水印与 GitHub star 引导 + `@author` 同步 ReTri + `.bsr-b` flex:1 让 footer 固定可见；真站验证 3.55H 无字幕视频 `BV1424U6JEGL` API subCount=0 正确触发 AI 转写兜底；门禁三连全绿：单测 32/32、灰度 17/17、状态机 7/7、UI DOM 渲染 + 复制 toast 断言通过。v8.1.5：YouTube 字幕时间戳解析修复——parseTtml 正则重写兼容 `<p begin/end>` 双时间格式 + vttTime 逗号毫秒兼容 + 导出 TXT/SRT 加 UTF-8 BOM；v8.1.4：设置漏存修复 + switchLan/bilibili resolve 补世代号守卫；v8.1.3：SPA 切视频后旧转写不再追尾污染新视频——asrGen 世代号机制 + 21 个取消点统一收口）。
 
 ## 许可证
 

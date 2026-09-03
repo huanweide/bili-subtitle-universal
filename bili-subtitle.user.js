@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.4
+// @version      8.1.5
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       阿梓 (AI 增强版)
 // @icon         https://www.bilibili.com/favicon.ico
@@ -322,9 +322,9 @@
     s = (s || '').trim();
     var parts = s.split(':');
     var h = 0, m = 0, sec = 0;
-    if (parts.length === 3) { h = +parts[0]; m = +parts[1]; sec = parseFloat(parts[2]); }
-    else if (parts.length === 2) { m = +parts[0]; sec = parseFloat(parts[1]); }
-    else sec = parseFloat(parts[0]) || 0;
+    if (parts.length === 3) { h = +parts[0]; m = +parts[1]; sec = parseFloat(String(parts[2]).replace(',', '.')); }
+    else if (parts.length === 2) { m = +parts[0]; sec = parseFloat(String(parts[1]).replace(',', '.')); }
+    else sec = parseFloat(String(parts[0]).replace(',', '.')) || 0;
     return h * 3600 + m * 60 + sec;
   }
   function parseVtt(text) {
@@ -348,17 +348,37 @@
     }
     return out;
   }
+  function ttmlTime(s) {
+    s = String(s == null ? '' : s).trim();
+    var m = s.match(/^(\d+):(\d{1,2}):(\d{1,2}(?:[.,]\d+)?)$/);
+    if (m) return (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3].replace(',', '.'));
+    var f = parseFloat(s);
+    return isFinite(f) ? f : 0;
+  }
   function parseTtml(xmlText) {
     var out = [];
+    var tagRe = /<(text|p)\b([^>]*)>([\s\S]*?)<\/(?:text|p)>/gi;
+    var attrRe = /([A-Za-z:]+)\s*=\s*"([^"]*)"/g;
+    var m;
     try {
-      var doc = new DOMParser().parseFromString(xmlText, 'text/xml');
-      var texts = doc.getElementsByTagName('text');
-      for (var i = 0; i < texts.length; i++) {
-        var t = texts[i];
-        var start = parseFloat(t.getAttribute('start') || '0');
-        var dur = parseFloat(t.getAttribute('dur') || '0');
-        var content = (t.textContent || '').trim();
-        if (content) out.push({ from: start, to: start + (dur || 1), content: content });
+      while ((m = tagRe.exec(String(xmlText))) !== null) {
+        var attrs = {}, am;
+        attrRe.lastIndex = 0;
+        while ((am = attrRe.exec(m[2])) !== null) attrs[am[1].toLowerCase()] = am[2];
+        var begin = attrs.begin, end = attrs.end, start = attrs.start, dur = attrs.dur;
+        var from = ttmlTime(begin != null ? begin : (start != null ? start : '0'));
+        var to;
+        if (end != null) to = ttmlTime(end);
+        else to = from + (dur != null ? parseFloat(dur) : 1);
+        var content = m[3]
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
+          .replace(/&nbsp;/g, ' ')
+          .split('\n').map(function (l) { return l.trim(); }).join('\n')
+          .trim();
+        if (content) out.push({ from: from, to: to, content: content });
       }
     } catch (e) { log('TTML 解析失败', e); }
     return out;
@@ -1473,8 +1493,8 @@
     root.querySelector('#bsrClose').onclick = function () { root.querySelector('#bsr-panel').classList.remove('show'); };
     root.querySelector('#bsrGet').onclick = function () { getSubtitles(); };
     root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(state.body) : getVideoInfoText()); };
-    root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', bodyToTxt(state.body)); };
-    root.querySelector('#bsrSrt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.srt', bodyToSrt(state.body), 'text/plain;charset=utf-8'); };
+    root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(state.body)); };
+    root.querySelector('#bsrSrt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.srt', '\uFEFF' + bodyToSrt(state.body), 'text/plain;charset=utf-8'); };
     root.querySelector('#bsrLan').onchange = function (e) { switchLan(e.target.value); };
     root.querySelector('#bsrCancel').onclick = function () { if (state.asr) state.asr.cancel = true; };
     root.querySelector('#bsrAsrBtn').onclick = function () { runAsr(); };

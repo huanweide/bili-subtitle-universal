@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 8.1.5 · YouTube 字幕时间戳解析修复 + 导出 TXT/SRT 加 BOM
+
+- **【修复】parseTtml 只认 `<text start/dur>` 形态，YouTube 字幕时间戳全乱**：YouTube timedtext（`fmt=ttml`）实际返回的是 `<p begin="00:00:01.500" end="00:00:04.000">`（HH:MM:SS.mmm 属性格式），旧解析器用 `parseFloat("00:00:07.340")` 在冒号处截断得 0——时间戳全部错乱或解析为空。重写为**正则解析 + 双形态兼容**（`<text start/dur>` 秒数与 `<p begin/end>` 双时间格式），并彻底摆脱 DOMParser（Node 单测从此能真实断言解析结果）。新增 `ttmlTime` helper。
+- **【修复】vttTime 不认 SRT 逗号毫秒**：`parseFloat("01,000")` 截断返回 1，SRT 型 `<track>`（部分站点 track 指向 .srt 文件）时间精度丢失到秒。三处 parseFloat 统一先 `replace(',', '.')`，VTT 点毫秒与 SRT 逗号毫秒全兼容。
+- **【修复】导出 TXT/SRT 无 UTF-8 BOM，Windows 记事本打开中文乱码**：两个下载调用点内容加 `\uFEFF` 前缀（复制功能不受影响——复制走 bodyToTxt 不带 BOM）。
+- **【测试】Node 单测 32/32 全绿**：新增 vttTime 逗号毫秒 / parseTtml text 形态 / parseTtml YouTube `<p>` 形态（含实体解码与 `<br>` 分行）/ ttmlTime 双格式真实断言（旧 parseTtml 用例原因依赖 DOMParser 只能验证函数存在，现为正则版可真实测）。原 17 项浏览器灰度零回归，状态机模拟 7/7 PASS。截图 `tests/screenshot-sim-v815.png` 留档。
+
 ## 8.1.4 · 设置漏存修复 + switchLan/bilibili resolve 补世代号守卫
 
 - **【修复】v8.1 新增的两个设置字段刷新即丢**：`asrLongMode`（超长视频策略）与 `asrPlayRate`（播放录制倍速）只有 `GM_setValue` 保存、`SETTINGS` 初始化却从没 `GM_getValue` 读回——用户改完设置刷新页面就全部重置回默认值。现在初始化读回，配置真正持久化。

@@ -38,14 +38,14 @@ const funcs = [
   'add32', 'cmn', 'ff', 'gg', 'hh', 'ii', 'md5cycle', 'md5blk', 'md51', 'rhex', 'hex', 'md5',
   'getMixinKey', 'buildQs', 'wbiSign', 'wbiQuery',
   'srtTime', 'bodyToTxt', 'bodyToSrt',
-  'parseSrt', 'vttTime', 'parseVtt', 'parseTtml',
+  'parseSrt', 'vttTime', 'parseVtt', 'ttmlTime', 'parseTtml',
   'mergeBodies', 'splitTextByTime',
   'wavFromBuffer',
   'probeMime', 'estimateDecodedMB', 'shouldUseRecord'
 ];
 const vars = [extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache')];
 const code = 'var SETTINGS = { asrLongMode: "auto" };\n' + vars.concat(funcs.map(extractFunc)).join('\n');
-const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, estimateDecodedMB, shouldUseRecord, SETTINGS, wbiCache };')();
+const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, estimateDecodedMB, shouldUseRecord, SETTINGS, wbiCache };')();
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -99,10 +99,29 @@ test('parseVtt 标准（含标签）', () => {
   assert.strictEqual(r[0].content, '你好 世界');
   assert.strictEqual(r[1].from, 3600);
 });
-test('parseTtml', () => {
+test('vttTime 逗号毫秒（SRT 型 track）', () => {
+  assert.strictEqual(scope.vttTime('00:00:01,500'), 1.5);
+  assert.strictEqual(scope.vttTime('00:00:01.500'), 1.5);
+});
+test('parseTtml text+start/dur 形态', () => {
   const t = '<transcript><text start="0" dur="2">hello</text><text start="2" dur="3">world</text></transcript>';
-  // 浏览器 DOMParser 环境，Node 下跳过实际解析但验证函数存在
-  assert.strictEqual(typeof scope.parseTtml, 'function');
+  const r = scope.parseTtml(t);
+  assert.strictEqual(r.length, 2);
+  assert.strictEqual(r[0].from, 0); assert.strictEqual(r[0].to, 2); assert.strictEqual(r[0].content, 'hello');
+  assert.strictEqual(r[1].from, 2);
+});
+test('parseTtml YouTube <p begin/end> 形态', () => {
+  const t = '<tt><body><div><p begin="00:00:01.500" end="00:00:04.000">Hello &amp; world</p><p begin="00:00:04.000" end="00:00:05.250">Second<br/>line</p></div></body></tt>';
+  const r = scope.parseTtml(t);
+  assert.strictEqual(r.length, 2);
+  assert.strictEqual(r[0].from, 1.5); assert.strictEqual(r[0].to, 4); assert.strictEqual(r[0].content, 'Hello & world');
+  assert.strictEqual(r[1].from, 4); assert.strictEqual(r[1].content, 'Second\nline');
+});
+test('ttmlTime 两种格式', () => {
+  assert.strictEqual(scope.ttmlTime('00:01:02,500'), 62.5);
+  assert.strictEqual(scope.ttmlTime('00:01:02.500'), 62.5);
+  assert.strictEqual(scope.ttmlTime('7.25'), 7.25);
+  assert.strictEqual(scope.ttmlTime(''), 0);
 });
 
 console.log('== 合并 / 切分 ==');

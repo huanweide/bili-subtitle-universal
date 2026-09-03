@@ -113,7 +113,7 @@ decodeAudioData 一次性解码成 AudioBuffer
 ## 开发
 
 ```bash
-node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（37 项，含 3H 边界 5 条）
+node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断/多P缓存（41 项，含 3H 边界 5 条 + 多 P 回归 4 条）
 node tests/serve.js                      # 静态服务，端口 8765
 SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从 env 读 key，不入仓库）
 ```
@@ -124,7 +124,7 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从
 
 ## 版本
 
-当前 **8.1.7**（v8.1.7：3H 超长音频边界修固——estimateDecodedMB 修 probeMime(null) bug + m4a 保守取 64kbps 防高码率漏判、shouldUseRecord 临界 >120MB 改 ≥120MB 防漏判 1 字节；自动更新元数据——头部补 @updateURL/@downloadURL（jsdelivr CDN 国内可读）+ @supportURL 让 Tampermonkey 自动检查更新用户免手动重装；新增 5 条 3H 边界 Node 单测（3.55H 195MB、3H 86MB、临界 120MB、10MB 安全小文件、estimateDecodedMB 195MB 估时长）单测总数 37/37。v8.1.6：设置面板加硅基流动邀请码卡片（axOmWfWi 一键复制 + 去注册领 ¥16 引导链接）+ 转写模型下拉下方邀请链接 + 面板底部 ReTri 作者水印与 GitHub star 引导 + `@author` 同步 ReTri + `.bsr-b` flex:1 让 footer 固定可见。v8.1.5：YouTube 字幕时间戳解析修复）。
+当前 **8.1.8**（v8.1.8：多 P 视频切 P 字幕不刷新修复——fetchBody 缓存 key 从 bvid_lan 改 cid_lan 优先（B站多 P 共用 bvid，旧 key 令 P1/P2 撞同一缓存，切 P 永远命中上一 P 字幕），getSubtitles 补全世代号守卫（myGen + resolve/fetchSubs/fetchBody/translateBody/catch 五处 asrStop 自查，切 P 后旧流程结果一律丢弃不写回），新增 4 条多 P 回归 Node 单测总数 41/41。v8.1.7：3H 超长音频边界修固——estimateDecodedMB 修 probeMime(null) bug + m4a 保守取 64kbps 防高码率漏判、shouldUseRecord 临界 >120MB 改 ≥120MB 防漏判 1 字节；自动更新元数据——头部补 @updateURL/@downloadURL（jsdelivr CDN 国内可读）+ @supportURL 让 Tampermonkey 自动检查更新用户免手动重装；新增 5 条 3H 边界 Node 单测 单测总数 37/37。v8.1.6：设置面板加硅基流动邀请码卡片（axOmWfWi 一键复制 + 去注册领 ¥16 引导链接）+ 转写模型下拉下方邀请链接 + 面板底部 ReTri 作者水印与 GitHub star 引导 + `@author` 同步 ReTri + `.bsr-b` flex:1 让 footer 固定可见。v8.1.5：YouTube 字幕时间戳解析修复）。
 
 ## 许可证
 

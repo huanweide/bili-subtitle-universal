@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 8.1.8 · 多 P 视频切 P 字幕不刷新修复
+
+- **【修复·主犯】字幕缓存 key 没带 cid，多 P 必串台**：`fetchBody` 的缓存 key 是 `bvid_lan`，而 B站多 P 视频所有分 P 共用同一个 bvid——P1 和 P2 撞同一个缓存 key，切 P 后点「获取字幕」永远直接命中上一 P 的缓存字幕，怎么点都不更新。改为 **`cid_lan`（B站 cid 全站唯一）优先**、YouTube `videoId` 次之，多 P 各 P 各自缓存互不干扰。
+- **【修复·帮凶】getSubtitles 全程无世代号守卫**：上一 P 的获取流程还在途中（WBI 签名/pagelist/字幕下载多个 await）时切了 P，`resetForNewVideo` 清掉旧状态、标题刷成新 P，但旧流程会继续把上一 P 字幕写回 `state.body`——「标题是 P2、复制出来是 P1 字幕」的典型现场。函数入口捕获 `myGen = asrGen`，resolve / fetchSubs / fetchBody / translateBody / catch 五处 await 后自查 `asrStop(myGen)`，过期一律静默丢弃不写回。至此与 runAsr / switchLan / bilibili resolve（v8.1.3~8.1.4）同款病根全量封死。
+- **【测试】Node 单测 41/41**（原 37 + 新增 4 条多 P 回归断言）：fetchBody 缓存 key 以 cid 优先、getSubtitles 捕获 myGen、asrStop 守卫 ≥4 处、守卫触发直接 return。浏览器灰度 17/17、状态机 7/7 零回归（Edge 无头通道 `tests/_edge-gray.js`，agent-browser 的 Chrome 本轮起不来时的备用门禁）。
+- 切 P 后仍需点一次「获取字幕」（AI 转写按 P 全量收费，不做自动重转，防止 3H 多 P 视频连环烧额度）；但保证点出来的**必定是当前 P** 的字幕。
+
 ## 8.1.7 · 3H 超长音频边界修固 + 自动更新元数据
 
 - **【修复】estimateDecodedMB 理论隐患**：旧实现 `probeMime(null)` 永远返 null（`new Uint8Array(null, ...)` 抛错被吞），导致 `bytesPerSec` 永远 12000。改成基于 `blob.type` 真实判定：webm/ogg 取 8000、mpeg 取 16000、**m4a/aac/未知取 8000 保守码率**，防 128-192kbps 高码率 3H 长视频漏判 `record` 兜底（漏判会走 decode → 浏览器 OOM）。

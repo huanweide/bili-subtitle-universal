@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.1.7
+// @version      8.1.8
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（MIME 自愈 + 内存预检，3 小时长音频自动「播放录制」兜底，稳得离谱）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1249,7 +1249,9 @@
 
   // ===================== 字幕正文获取（含站点差异） =====================
   async function fetchBody(lan) {
-    var key = (state.bvid || state.videoId || state.aid || state.title) + '_' + lan;
+    var key = (state.cid || state.videoId || state.bvid || state.aid || state.title) + '_' + lan;
+    // v8.1.8 修复：B站多 P 是同一个 bvid，旧 key(bvid_lan) 会让 P1/P2 撞同一个缓存，
+    // 切 P 后「获取字幕」永远命中上一 P 的缓存。改用 cid（B站全站唯一）优先做 key。
     if (cache[key]) { state.body = cache[key]; state.lan = lan; return state.body; }
     var sub = null;
     for (var i = 0; i < state.subs.length; i++) if (state.subs[i].lan === lan) sub = state.subs[i];
@@ -1275,6 +1277,7 @@
   // ===================== 主流程 =====================
   async function getSubtitles() {
     if (state.loading) return;
+    var myGen = asrGen;   // v8.1.8 修复：补世代号守卫——切 P/切视频后旧流程的结果一律丢弃，不再写回 state
     state.loading = true; state.err = ''; state.noSub = false; state.asrRan = false;
     state.asr = null; render();
     try {
@@ -1283,6 +1286,7 @@
       state.adapter = ad;
       state.subs = [];   // 必须先清：SPA 站内切视频时旧字幕列表会残留，导致「张冠李戴」
       await ad.resolve();
+      if (asrStop(myGen)) return;   // 切 P/切视频：丢弃旧 resolve 结果
 
       if (SETTINGS.asrForce) {
         toast('已开启「始终转写」，跳过自带字幕，直接音频转写');
@@ -1297,13 +1301,16 @@
           if (!(SETTINGS.asrEnable || SETTINGS.asrFallback)) throw e;
         }
       }
+      if (asrStop(myGen)) return;   // 切 P/切视频：旧字幕列表不落渲染
       if (state.subs.length) {
         var lan = pickLanguage(state.subs);
         await fetchBody(lan);
+        if (asrStop(myGen)) return;   // 切 P/切视频：旧字幕正文不写回（多 P 串台根因之二）
         if (SETTINGS.translateTo !== 'none' && !sameLang(lan, SETTINGS.translateTo)) {
           state.asr = { phase: '翻译中', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null };
           render();
           var t = await translateBody(state.body);
+          if (asrStop(myGen)) return;   // 切 P/切视频：旧翻译结果丢弃
           if (t) { state.body = t; state.lan = lan + ' → ' + (LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo); }
           state.asr = null;
         }
@@ -1315,6 +1322,7 @@
       }
     } catch (e) {
       log(e);
+      if (asrStop(myGen)) return;   // 切 P/切视频：旧流程的报错不打扰新视频
       state.asr = null;   // 翻译/转写中途失败也要复位，避免界面卡在「翻译中」
       if (SETTINGS.asrFallback && !state.asrRan && !state.body) {
         state.err = '';

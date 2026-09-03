@@ -218,5 +218,24 @@ test('shouldUseRecord: 强制 record 录制', () => {
   assert.strictEqual(scope.shouldUseRecord({ size: 1 }), true);
 });
 
+console.log('== 多 P 视频切 P 字幕刷新（v8.1.8 回归）==');
+test('fetchBody 缓存 key 以 cid 优先（多 P 不串台）', () => {
+  const fn = extractFunc('fetchBody');
+  assert.ok(/var\s+key\s*=\s*\(state\.cid\s*\|\|/.test(fn), '缓存 key 应以 state.cid 优先，实际：' + fn.split('\n')[0]);
+});
+test('getSubtitles 捕获世代号 myGen', () => {
+  const fn = extractFunc('getSubtitles');
+  assert.ok(/var\s+myGen\s*=\s*asrGen\s*;/.test(fn), 'getSubtitles 应在入口捕获 myGen = asrGen');
+});
+test('getSubtitles 每个 await 后都有 asrStop 守卫（≥4 处）', () => {
+  const fn = extractFunc('getSubtitles');
+  const n = (fn.match(/asrStop\(myGen\)/g) || []).length;
+  assert.ok(n >= 4, 'asrStop 守卫应 ≥4 处（resolve/fetchSubs/fetchBody/translateBody/catch），实际 ' + n + ' 处');
+});
+test('getSubtitles 守卫触发时直接 return（旧结果不写回）', () => {
+  const fn = extractFunc('getSubtitles');
+  assert.ok(/if\s*\(asrStop\(myGen\)\)\s*return;/.test(fn), '守卫应形如 if (asrStop(myGen)) return;');
+});
+
 console.log('\n结果：' + passed + ' 通过，' + failed + ' 失败');
 process.exit(failed ? 1 : 0);

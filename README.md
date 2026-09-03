@@ -1,6 +1,6 @@
 # 全网视频字幕提取 · AI 转写版
 
-> 纯油猴脚本 · 零安装 · 零后端 · 一条脚本搞定「全网视频字幕提取 + 无字幕 AI 转写」，B 站 WBI 官方字幕 / YouTube 字幕 / 任意站点的 `<track>` WebVTT 全支持，无字幕时自动调用硅基流动 SenseVoice 云端转写，支持 3 小时长视频。
+> 纯油猴脚本 · 零安装 · 零后端 · 一条脚本搞定「全网视频字幕提取 + 无字幕 AI 转写」，B 站 WBI 官方字幕 / YouTube 字幕 / 任意站点的 `<track>` WebVTT 全支持，无字幕时自动调用硅基流动 SenseVoice 云端转写，**MIME 自愈 + 内存预检 + 播放录制兜底**，3 小时长音频稳得离谱。
 
 ## 为什么是「独一家」
 
@@ -18,10 +18,13 @@
 1. **B 站官方字幕**：WBI 签名稳定，多语言自动选优（人工字幕 > AI 字幕；中文 > 英文 > ...），自动跟 P 切、登录态取 AI 字幕。
 2. **YouTube 字幕**：解析 `ytInitialPlayerResponse` 中的 caption tracks，自动取 TTML，含自动字幕（kind=asr）标识。
 3. **通用 HTML5**：自动扫描页面 `<video>` 的 `<track kind="subtitles|captions">` 拿 WebVTT；`<video src>` 是直链时可直接 AI 转写音频。
-4. **AI 语音转写（无字幕兜底）**：
+4. **AI 语音转写（无字幕兜底，三层防线）**：
    - 整段直传：≤40MB 音频直接给 SenseVoice（原始 m4a，快）。
    - 分片转写：大文件 `decodeAudioData` 解码 + `OfflineAudioContext` 同上下文重采样到 16kHz 单声道 → 切片 → 转写 → 拼接时间戳。
-   - 修复了 v7.x 的「跨 AudioContext 连接」错误（`cannot connect to an AudioNode belonging to a different audio context`），3 小时长视频可稳定跑。
+   - **🆕 v8.1 三层防线**根治你看到的 `Unable to decode audio data（可能内存不足）`：
+     - **① MIME 误标自愈**：魔数探针（ftyp/RIFF/EBML/OggS/ID3…）判真实容器，不一致自动重建 blob 重试。
+     - **② 内存预检 + 策略化路由**：预估 PCM 占用 > 1GB 或源 > 120MB 自动走「播放录制」兜底；可在设置里选 auto / decode / record。
+     - **③ 播放录制兜底**：隐藏 audio 倍速播放 + `captureStream` + 同上下文实时 AudioContext + 跨回调游标降采样 16kHz → 攒片 → 转写。内存 O(单片)，3 小时不 OOM。倍速 2/4/8/16 可调，结束自动对账修正时间轴。自动播放被拦截给「▶ 解锁」按钮。
    - 流水线：转写第 N 片的同时预渲染第 N+1 片，省时间。
    - 单片超限自动对半拆小递归。
    - 进度可视化：下载进度条 + 分片状态（✓ / ⏳ / ✗）+ 预计剩余时间 + 可取消。
@@ -93,15 +96,16 @@ decodeAudioData 一次性解码成 AudioBuffer
 ## 开发
 
 ```bash
-node tests/run-tests.js   # 单元测试：MD5/WBI/SRT/VTT/WAV 头等纯函数
-node tests/serve.js       # 静态服务，端口 8765
+node tests/run-tests.js                  # 单元测试：MD5/WBI/SRT/VTT/WAV/MIME/内存预估/策略判断（29 项）
+node tests/serve.js                      # 静态服务，端口 8765
+SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js   # 真实 API 冒烟（仅从 env 读 key，不入仓库）
 ```
 
-灰度测试：`http://127.0.0.1:8765/tests/test.html`，用真实 Chromium 打开验证 UI 与音频管线。
+灰度测试：`http://127.0.0.1:8765/tests/test.html`，用真实 Chromium 打开验证 UI / 音频管线 / **解码失败降级 / MIME 自愈 / captureStream 出声**。
 
 ## 版本
 
-当前 **8.0.0**（v7 → v8 音频管线彻底重写 + 多站点适配器架构 + 设置 UI 重做）。
+当前 **8.1.0**（v8 → v8.1：解决「音频解码失败（可能内存不足）」，MIME 自愈 + 内存预检 + 播放录制兜底 + 真实 SF key 冒烟）。
 
 ## 许可证
 

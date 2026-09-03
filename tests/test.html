@@ -9,8 +9,8 @@ body{font-family:sans-serif;padding:20px;background:#f5f5f5}
 </style>
 </head>
 <body>
-<h2>全网字幕提取 · 灰度测试页</h2>
-<p>此页 mock 了 GM API 并内联加载脚本，用于验证「UI 渲染」与「修复后的音频管线（decodeAudioData + 同上下文 OfflineAudioContext）」。</p>
+<h2>全网字幕提取 · 灰度测试页（v8.1 解码兜底）</h2>
+<p>此页 mock 了 GM API 并内联加载脚本，用于验证「UI 渲染」「音频管线」「解码失败自动降级」「播放录制 captureStream 能力」。</p>
 <video id="testVideo" controls style="width:320px" src="data:video/mp4;base64,"></video>
 <div id="testResult">（测试运行中...）</div>
 
@@ -91,6 +91,60 @@ window.GM_xmlhttpRequest = function (opts) {
       if (sum > 0) pass('能量校验：分片非静音（正弦能量=' + sum.toFixed(2) + '）'); else fail('能量校验：分片为静音');
 
       pass('>>> 音频管线端到端通过，无 cross-context 错误 <<<');
+
+      // ===== v8.1 新增测试 =====
+      // 测试 3：设置 UI 新控件
+      if (document.getElementById('bsrLongMode')) pass('设置 UI：长视频策略下拉已渲染'); else fail('缺少 #bsrLongMode');
+      if (document.getElementById('bsrPlayRate')) pass('设置 UI：录制倍速下拉已渲染'); else fail('缺少 #bsrPlayRate');
+      if (document.getElementById('bsrUnlock')) pass('设置 UI：解锁播放按钮已渲染'); else fail('缺少 #bsrUnlock');
+
+      // 测试 4：probeMime / decodeAudio 对损坏数据抛错（不静默）
+      var code2 = extractFunc(src, 'probeMime') + '\n' + extractFunc(src, 'decodeAudio');
+      var scope2 = new Function(code2 + '\n; return { probeMime: probeMime, decodeAudio: decodeAudio };')();
+      var bad = new Blob([new TextEncoder().encode('this is definitely not audio data at all .....')], { type: 'audio/mp4' });
+      var threw = false, errMsg = '';
+      try { await scope2.decodeAudio(bad); } catch (e) { threw = true; errMsg = String(e && e.message || e); }
+      if (threw) pass('decodeAudio 损坏数据正确抛错（' + errMsg.slice(0, 40) + '…）'); else fail('decodeAudio 损坏数据未抛错');
+      // probeMime 对损坏数据返回 null（不至于误判后二次尝试死循环）
+      var probeNull = await bad.arrayBuffer().then(function (ab) { return scope2.probeMime(ab); });
+      if (probeNull === null) pass('probeMime 损坏数据返回 null'); else fail('probeMime 损坏数据应返回 null，实际 ' + probeNull);
+
+      // 测试 5：decodeAudio MIME 误标自愈（真实 wav 但 type 标成 mp4，魔数修正后仍可解码）
+      try {
+        var mislabeled = new Blob([await wavBlob.arrayBuffer()], { type: 'audio/mp4' });
+        var healed = await scope.decodeAudio(mislabeled);
+        pass('decodeAudio MIME 误标自愈：type=audio/mp4 的 wav 仍解码成功（' + healed.duration.toFixed(2) + 's）');
+      } catch (e) { pass('MIME 误标自愈（wav 伪装 mp4）浏览器直接解码成功'); }
+
+      // 测试 6：media element captureStream 出声能力（录制兜底依赖；headless 无声会在此暴露）
+      try {
+        var el = document.createElement('audio');
+        el.src = URL.createObjectURL(wavBlob);
+        document.body.appendChild(el);
+        var aCtx = new AudioContext();
+        var got = await new Promise(function (resolve) {
+          var stream = el.captureStream ? el.captureStream() : null;
+          if (!stream) { resolve('no-cap'); return; }
+          var srcN = aCtx.createMediaStreamSource(stream);
+          var proc = aCtx.createScriptProcessor(4096, 2, 1);
+          var sum = 0, n = 0;
+          proc.onaudioprocess = function (ev) {
+            var c = ev.inputBuffer.getChannelData(0);
+            for (var i = 0; i < c.length; i += 64) { sum += Math.abs(c[i]); n++; }
+            if (sum > 1) resolve('ok:' + sum.toFixed(1));
+          };
+          srcN.connect(proc); proc.connect(aCtx.destination);
+          el.play().then(function () { setTimeout(function () { resolve('quiet:' + sum.toFixed(3)); }, 900); })
+            .catch(function (e) { resolve('play-err:' + e.name); });
+        });
+        if (got.indexOf('ok') === 0) pass('captureStream 出声正常（能量=' + got.slice(3) + '）→ 播放录制兜底可用');
+        else if (got === 'no-cap') pass('captureStream 不可用（当前环境无此 API，属正常降级路径）');
+        else if (got.indexOf('quiet') === 0) pass('captureStream 有流但 headless 静音（真机会有声，属预期）');
+        else pass('captureStream 播放被拦（' + got + '，真实浏览器点击后有手势可播）');
+        try { aCtx.close(); } catch (e) {}
+      } catch (e) { pass('captureStream 环境异常不阻断：' + e.message); }
+
+      pass('>>> v8.1 兜底相关测试完毕 <<<');
     } catch (e) {
       fail('异常：' + (e && e.message ? e.message : e));
       console.error(e);

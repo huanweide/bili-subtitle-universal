@@ -40,11 +40,12 @@ const funcs = [
   'srtTime', 'bodyToTxt', 'bodyToSrt',
   'parseSrt', 'vttTime', 'parseVtt', 'parseTtml',
   'mergeBodies', 'splitTextByTime',
-  'wavFromBuffer'
+  'wavFromBuffer',
+  'probeMime', 'estimateDecodedMB', 'shouldUseRecord'
 ];
 const vars = [extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache')];
-const code = vars.concat(funcs.map(extractFunc)).join('\n');
-const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, wbiCache };')();
+const code = 'var SETTINGS = { asrLongMode: "auto" };\n' + vars.concat(funcs.map(extractFunc)).join('\n');
+const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, estimateDecodedMB, shouldUseRecord, SETTINGS, wbiCache };')();
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -123,6 +124,54 @@ test('wavFromBuffer 头字段', () => {
   const blob = scope.wavFromBuffer(fakeBuf);
   assert.ok(blob instanceof Blob, '应返回 Blob');
   assert.ok(blob.size === 44 + 4 * 2, 'WAV 大小 = 44 + samples*2，实际 ' + blob.size);
+});
+
+console.log('== 解码兜底策略（新增 v8.1） ==');
+test('probeMime WAV 魔数', () => {
+  const b = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0,0,0,0]), Buffer.from('WAVE')]);
+  assert.strictEqual(scope.probeMime(b), 'audio/wav');
+});
+test('probeMime MP4 魔数(ftyp@4)', () => {
+  const b = Buffer.concat([Buffer.from([0,0,0,0x18]), Buffer.from('ftypM4A ')]);
+  assert.strictEqual(scope.probeMime(b), 'audio/mp4');
+});
+test('probeMime WebM(EBML)', () => {
+  const b = Buffer.from([0x1A, 0x45, 0xDF, 0xA3, 0x01]);
+  assert.strictEqual(scope.probeMime(b), 'audio/webm');
+});
+test('probeMime Ogg', () => {
+  const b = Buffer.from('OggS...');
+  assert.strictEqual(scope.probeMime(b), 'audio/ogg');
+});
+test('probeMime ID3(MP3)', () => {
+  const b = Buffer.from('ID3....');
+  assert.strictEqual(scope.probeMime(b), 'audio/mpeg');
+});
+test('probeMime 未知数据返回 null', () => {
+  const b = Buffer.from('hello world this is not audio');
+  assert.strictEqual(scope.probeMime(b), null);
+});
+test('estimateDecodedMB 随字节增长', () => {
+  const m1 = scope.estimateDecodedMB({ size: 6 * 1024 * 1024 });   // ~6MB → 数百 MB 级
+  const m2 = scope.estimateDecodedMB({ size: 120 * 1024 * 1024 }); // 120MB → 数 GB 级
+  assert.ok(m1 > 100 && m1 < 2000, '6MB 预估应合理，实际 ' + m1 + 'MB');
+  assert.ok(m2 > m1 * 5, '120MB 预估应远大于 6MB（' + m1 + ' vs ' + m2 + '）');
+});
+test('shouldUseRecord: auto 小文件不录制', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  assert.strictEqual(scope.shouldUseRecord({ size: 2 * 1024 * 1024 }), false);
+});
+test('shouldUseRecord: auto 超大文件(>120MB)录制', () => {
+  scope.SETTINGS.asrLongMode = 'auto';
+  assert.strictEqual(scope.shouldUseRecord({ size: 130 * 1024 * 1024 }), true);
+});
+test('shouldUseRecord: 强制 decode 不录制', () => {
+  scope.SETTINGS.asrLongMode = 'decode';
+  assert.strictEqual(scope.shouldUseRecord({ size: 500 * 1024 * 1024 }), false);
+});
+test('shouldUseRecord: 强制 record 录制', () => {
+  scope.SETTINGS.asrLongMode = 'record';
+  assert.strictEqual(scope.shouldUseRecord({ size: 1 }), true);
 });
 
 console.log('\n结果：' + passed + ' 通过，' + failed + ' 失败');

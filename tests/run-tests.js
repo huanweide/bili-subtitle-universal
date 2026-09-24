@@ -20,6 +20,11 @@ function extractVarObj(name) {
   if (m) return m[0];
   throw new Error('未找到对象变量 ' + name);
 }
+function extractVarValue(name) {
+  const m = src.match(new RegExp('var\\s+' + name + '\\s*=\\s*[^;]+;'));
+  if (!m) throw new Error('未找到变量 ' + name);
+  return m[0];
+}
 function extractFunc(name) {
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{');
   const m = re.exec(src);
@@ -41,11 +46,15 @@ const funcs = [
   'parseSrt', 'vttTime', 'parseVtt', 'ttmlTime', 'parseTtml',
   'mergeBodies', 'splitTextByTime',
   'wavFromBuffer',
-  'probeMime', 'estimateDecodedMB', 'shouldUseRecord'
+  'probeMime', 'guessDuration', 'estimateDecodedMB', 'shouldUseRecord'
 ];
-const vars = [extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache')];
+const vars = [
+  extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache'),
+  // v8.2.0 音频解码常量（顺序不能反：PCM_BYTES_PER_SEC 依赖 DECODE_RATE）
+  extractVarValue('DECODE_RATE'), extractVarValue('PCM_BYTES_PER_SEC'), extractVarValue('RECORD_THRESHOLD_MB')
+];
 const code = 'var SETTINGS = { asrLongMode: "auto" };\n' + vars.concat(funcs.map(extractFunc)).join('\n');
-const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, estimateDecodedMB, shouldUseRecord, SETTINGS, wbiCache };')();
+const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, guessDuration, estimateDecodedMB, shouldUseRecord, DECODE_RATE, PCM_BYTES_PER_SEC, RECORD_THRESHOLD_MB, SETTINGS, wbiCache };')();
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -170,44 +179,50 @@ test('probeMime 未知数据返回 null', () => {
   const b = Buffer.from('hello world this is not audio');
   assert.strictEqual(scope.probeMime(b), null);
 });
-test('estimateDecodedMB 随字节增长', () => {
-  const m1 = scope.estimateDecodedMB({ size: 6 * 1024 * 1024 });   // ~6MB → 数百 MB 级
-  const m2 = scope.estimateDecodedMB({ size: 120 * 1024 * 1024 }); // 120MB → 数 GB 级
-  assert.ok(m1 > 100 && m1 < 2000, '6MB 预估应合理，实际 ' + m1 + 'MB');
+test('estimateDecodedMB: 有真实时长时按 16kHz 单声道 64KB/s 算', () => {
+  // 10800 秒（3 小时）× 16000 采样 × 4 字节 = 691200000 字节 ≈ 659MB
+  const m = scope.estimateDecodedMB({ size: 86 * 1024 * 1024, type: 'audio/mp4' }, 10800);
+  assert.ok(m > 600 && m < 700, '3H 有真实时长应估约 659MB，实际 ' + m + 'MB');
+});
+test('estimateDecodedMB: 没有真实时长时退回按码率猜（保守取 64kbps）', () => {
+  // 86MB ÷ 8000B/s = 11264s；11264 × 64000B ÷ 1MB ≈ 687MB
+  const m = scope.estimateDecodedMB({ size: 86 * 1024 * 1024, type: 'audio/mp4' });
+  assert.ok(m > 600 && m < 750, '86MB 无元数据应估约 687MB，实际 ' + m + 'MB');
+});
+test('estimateDecodedMB 随字节单调增长', () => {
+  const m1 = scope.estimateDecodedMB({ size: 6 * 1024 * 1024 });
+  const m2 = scope.estimateDecodedMB({ size: 120 * 1024 * 1024 });
   assert.ok(m2 > m1 * 5, '120MB 预估应远大于 6MB（' + m1 + ' vs ' + m2 + '）');
 });
-test('shouldUseRecord: 3.55H m4a 128kbps (~195MB) auto 走录制', () => {
+test('shouldUseRecord: 3H 有真实时长 10800s → 走解码快路（不录制）', () => {
   scope.SETTINGS.asrLongMode = 'auto';
-  assert.strictEqual(scope.shouldUseRecord({ size: 195 * 1024 * 1024, type: 'audio/mp4' }), true);
+  // v8.2.0 核心收益：解码目标改 16000 单声道后，3 小时音频只占约 659MB < 800MB 阈值，
+  // 于是 3H 可以走「直接解码切片」的快路（几十秒），不必再真放 13 分钟
+  assert.strictEqual(scope.shouldUseRecord({ size: 86 * 1024 * 1024, type: 'audio/mp4' }, 10800), false);
 });
-test('shouldUseRecord: 3H m4a 64kbps (~86MB) auto 走录制（防高码率漏判）', () => {
+test('shouldUseRecord: 3H 拿不到真实时长也能走解码（保守估仍 < 800MB）', () => {
   scope.SETTINGS.asrLongMode = 'auto';
-  // 86MB m4a 按 8KB/s 保守码率估 durSec = 86*1024*1024/8000 ≈ 11264s ≈ 3.13H
-  // pcmMB ≈ 11264 * 384 / 1024 ≈ 4225MB > 1GB → 走录制
-  assert.strictEqual(scope.shouldUseRecord({ size: 86 * 1024 * 1024, type: 'audio/mp4' }), true);
+  // 无元数据时按 64kbps 保守估：86MB → 11264s → 约 687MB < 800MB
+  // 这个保守方向是安全的：真实码率越高、真实时长越短，占的内存只会更小
+  assert.strictEqual(scope.shouldUseRecord({ size: 86 * 1024 * 1024, type: 'audio/mp4' }), false);
 });
-test('shouldUseRecord: 临界 120MB m4a auto 走录制（>= 临界）', () => {
+test('shouldUseRecord: 10 小时真实时长 → 超 800MB 阈值，走录制', () => {
   scope.SETTINGS.asrLongMode = 'auto';
-  assert.strictEqual(scope.shouldUseRecord({ size: 120 * 1024 * 1024, type: 'audio/mp4' }), true);
+  // 36000s × 64KB/s ≈ 2197MB > 800MB
+  assert.strictEqual(scope.shouldUseRecord({ size: 280 * 1024 * 1024, type: 'audio/mp4' }, 36000), true);
 });
-test('shouldUseRecord: 10MB m4a auto 不走录制（小文件安全解码）', () => {
+test('shouldUseRecord: 源文件 ≥300MB 硬保险走录制', () => {
   scope.SETTINGS.asrLongMode = 'auto';
-  // 10MB m4a 按 8KB/s 估 durSec ≈ 1310s ≈ 21.8min → pcmMB ≈ 491MB < 1GB → 不走录制
-  assert.strictEqual(scope.shouldUseRecord({ size: 10 * 1024 * 1024, type: 'audio/mp4' }), false);
+  assert.strictEqual(scope.shouldUseRecord({ size: 300 * 1024 * 1024, type: 'audio/mp4' }, 600), true);
 });
-test('estimateDecodedMB: 195MB m4a 估时长远超 3.55H（保守防漏判）', () => {
-  // 195MB m4a 按 8KB/s 估 durSec = 25559s ≈ 7.1H（保守估比真实高，符合防漏判原则）
-  // pcmMB ≈ 25559 * 384 / 1024 ≈ 9585MB > 5000MB 阈值
-  const m = scope.estimateDecodedMB({ size: 195 * 1024 * 1024, type: 'audio/mp4' });
-  assert.ok(m > 5000, '195MB m4a 预估 PCM 应 > 5000MB（实际 ' + m + '）');
-});
-test('shouldUseRecord: auto 小文件不录制', () => {
+test('shouldUseRecord: 小文件安全解码', () => {
   scope.SETTINGS.asrLongMode = 'auto';
-  assert.strictEqual(scope.shouldUseRecord({ size: 2 * 1024 * 1024 }), false);
+  assert.strictEqual(scope.shouldUseRecord({ size: 10 * 1024 * 1024, type: 'audio/mp4' }, 1300), false);
 });
-test('shouldUseRecord: auto 超大文件(>120MB)录制', () => {
-  scope.SETTINGS.asrLongMode = 'auto';
-  assert.strictEqual(scope.shouldUseRecord({ size: 130 * 1024 * 1024 }), true);
+test('PCM 常量：解码目标 16000 单声道，每秒 64000 字节', () => {
+  assert.strictEqual(scope.DECODE_RATE, 16000);
+  assert.strictEqual(scope.PCM_BYTES_PER_SEC, 64000);
+  assert.strictEqual(scope.RECORD_THRESHOLD_MB, 800);
 });
 test('shouldUseRecord: 强制 decode 不录制', () => {
   scope.SETTINGS.asrLongMode = 'decode';
@@ -216,6 +231,75 @@ test('shouldUseRecord: 强制 decode 不录制', () => {
 test('shouldUseRecord: 强制 record 录制', () => {
   scope.SETTINGS.asrLongMode = 'record';
   assert.strictEqual(scope.shouldUseRecord({ size: 1 }), true);
+});
+
+console.log('== v8.2.0 长音频硬化（静音 / 不丢帧 / 不误判 / 背压 / 进度）==');
+test('decodeAudio 解码目标改成 16000 单声道（内存省 5.5 倍）', () => {
+  const fn = extractFunc('decodeAudio');
+  assert.ok(/new Ctx\(1, 1, DECODE_RATE\)/.test(fn), '解码上下文应为 new Ctx(1, 1, DECODE_RATE)');
+  assert.ok(!/44100/.test(fn), 'decodeAudio 里不应再出现 44100');
+});
+test('probeAudioMeta 只读元数据且静音（不会出声）', () => {
+  const fn = extractFunc('probeAudioMeta');
+  assert.ok(/preload\s*=\s*'metadata'/.test(fn), '应以 preload=metadata 只读元数据');
+  assert.ok(/muted\s*=\s*true/.test(fn), '应设 muted=true 防止出声');
+});
+test('runAsr 下载后探测真实时长再选路', () => {
+  const fn = extractFunc('runAsr');
+  assert.ok(/await probeAudioMeta\(blob\)/.test(fn), 'runAsr 应调用 probeAudioMeta');
+  assert.ok(/shouldUseRecord\(blob, state\.audioDurSec\)/.test(fn), 'shouldUseRecord 应带真实时长参数');
+});
+test('播放全程静音：增益节点设 0', () => {
+  const fn = extractFunc('recorderAsr');
+  assert.ok(/muteNode\.gain\.value\s*=\s*0/.test(fn), '静音节点增益应为 0');
+  assert.ok(/createMediaElementSource/.test(fn), '应用 createMediaElementSource 接管音频输出');
+});
+test('抓音通道优先 AudioWorklet，保留 ScriptProcessor 回退', () => {
+  const fn = extractFunc('recorderAsr');
+  assert.ok(/audioWorklet\.addModule/.test(fn), '应加载 AudioWorklet');
+  assert.ok(/createScriptProcessor/.test(fn), '应保留 ScriptProcessor 回退分支');
+  assert.ok(/if \(!tapReady\)/.test(fn), '回退分支应以 tapReady 判定');
+});
+test('AudioWorklet 处理器源码内联（保持单文件脚本）', () => {
+  assert.ok(/var WORKLET_SRC = \[/.test(src), '应内联 WORKLET_SRC 字符串数组');
+  assert.ok(/registerProcessor\("bsr-tap"/.test(src), '应注册 bsr-tap 处理器');
+});
+test('停滞判定看缓冲状态，不再 5 秒误判收工', () => {
+  const fn = extractFunc('recorderAsr');
+  assert.ok(/audio\.buffered/.test(fn), '停滞判定应读 audio.buffered');
+  assert.ok(/stallN >= 80/.test(fn), '应收紧到 80 次（20 秒）才判定收尾');
+  assert.ok(!/stallN >= 20/.test(fn), '不应保留旧的 20 次（5 秒）误判阈值');
+});
+test('背压：切片积压时暂停播放，降下来再继续', () => {
+  const fn = extractFunc('recorderAsr');
+  assert.ok(/pauseGate/.test(fn), '应存在背压闸门 pauseGate');
+  assert.ok(/pending\.length >= 3/.test(fn), '积压 ≥3 片应触发暂停');
+  assert.ok(/if \(pauseGate\) return;/.test(fn), '背压暂停不应被「意外暂停自动恢复」打断');
+});
+test('五阶段进度：download / probe / decode / record / transcribe / merge', () => {
+  const fn = extractFunc('runAsr');
+  ['download', 'probe', 'decode', 'transcribe', 'merge'].forEach(function (st) {
+    assert.ok(new RegExp("stage = '" + st + "'").test(fn), 'runAsr 应设置 stage=' + st);
+  });
+  const rf = extractFunc('recorderAsr');
+  assert.ok(/stage = 'record'/.test(rf), 'recorderAsr 应设置 stage=record');
+});
+test('实时字幕流：转写过程持续回填 preview', () => {
+  const fn = extractFunc('recorderAsr');
+  assert.ok(/state\.asr\.preview = segsAll\.slice\(-40\)/.test(fn), '录制路应回填 preview');
+  const rf = extractFunc('runAsr');
+  assert.ok(/state\.asr\.preview = body\.slice\(-40\)/.test(rf), '分片路应回填 preview');
+});
+test('转写完成发系统通知（GM_notification）', () => {
+  assert.ok(/@grant\s+GM_notification/.test(src), '头部应声明 @grant GM_notification');
+  const fn = extractFunc('notifyDone');
+  assert.ok(/GM_notification\(/.test(fn), 'notifyDone 应调用 GM_notification');
+});
+test('总进度按阶段权重折算（下载20/解码45/转写95/合并100）', () => {
+  const fn = extractFunc('render');
+  assert.ok(/return \[0, 20\]/.test(fn), '下载段应占 0-20');
+  assert.ok(/return \[45, 95\]/.test(fn), '转写段应占 45-95');
+  assert.ok(/return \[95, 100\]/.test(fn), '合并段应占 95-100');
 });
 
 console.log('== 多 P 视频切 P 字幕刷新（v8.1.8 回归）==');

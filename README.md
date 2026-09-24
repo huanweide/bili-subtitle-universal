@@ -2,6 +2,7 @@
 
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
+[![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
 [![version](https://img.shields.io/badge/version-9.0.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-75%2F75-3a8ee6)](tests/run-tests.js)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.2.1
+// @version      9.0.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（16kHz 直解省 5.5 倍内存 + 真实时长选路 + 转写全程静音 + 四阶段进度，3 小时长音频稳跑）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -985,7 +985,30 @@
         }
       }
 
-      // ② 大文件 / 直传失败：优先「整体解码分片」（秒级）；解码失败或音频超大自动降级「播放录制」（稳）
+      // ② v9.0 优先：B站 dash 音频带分片目录（sidx），走「逐片下载 + 逐片解码」快路
+      // 内存只占当前一片（几十 KB）、不用播放、时间戳来自分片目录（精确到毫秒级起点），3 小时音频也不怕
+      if (!body.length) {
+        var segBody = null;
+        if (SETTINGS.asrLongMode !== 'record') {
+          try {
+            state.asr.stage = 'decode';
+            state.asr.phase = '读取分片目录';
+            state.asr.progress = null;
+            render();
+            var segInfo = await probeSegments(audioUrl);
+            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+            log('分段解码可用：共 ' + segInfo.segs.length + ' 片，覆盖 ' + Math.round(segInfo.totalSec) + ' 秒，合计 ' + Math.round(segInfo.bytes / 1024 / 1024) + 'MB');
+            segBody = await segmentAsr(audioUrl, segInfo, myGen);
+          } catch (eSeg) {
+            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+            log('分段解码不可用，回落到整段解码 / 播放录制', eSeg);
+            segBody = null;
+          }
+        }
+        if (segBody && segBody.length) body = segBody;
+      }
+
+      // ③ 分段路不通时：优先「整体解码分片」（秒级）；解码失败或音频超大自动降级「播放录制」（稳）
       if (!body.length) {
         var audioBuf = null;
         var useRec = shouldUseRecord(blob, state.audioDurSec, state.audioCh);
@@ -1117,6 +1140,215 @@
       }
       throw e;
     }
+  }
+
+  // ===================== v9.0 分段解码（按分片索引逐片下载 + 逐片独立解码） =====================
+  // B 站 dash 音频是 fMP4，结构固定：
+  //   ftyp + moov + sidx + [ moof + mdat ] × N
+  //   · 开头那一小段（ftyp+moov+sidx）叫 init，是「说明书」，写着编码参数
+  //   · sidx 是「分片目录」，一次读出来就有每一片的大小与时长，不用逐片试探
+  //   · 任意一片 = init + (moof+mdat)，拼起来就是一个能独立解码的小文件
+  // 好处：内存只占当前这一片（几十 KB），不播放、不整段解码，3 小时音频也不怕；
+  //       时间戳直接用 sidx 给的精确起点，不再靠「数样本」推算。
+  var SEG_HEAD_BYTES = 262144;   // 先读 256KB 文件头，足够覆盖 init 段
+  var SEG_BATCH_SEC = 120;       // 攒够 120 秒音频送一次识别（少调用、控内存）
+  var SEG_CONCURRENCY = 4;       // 并发下载分片数
+
+  // 带 Range 头的下载
+  function fetchRange(url, start, end) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: url,
+        headers: {
+          'Range': 'bytes=' + start + '-' + end,
+          'Referer': location.origin || 'https://www.bilibili.com/',
+          'User-Agent': navigator.userAgent
+        },
+        responseType: 'arraybuffer',
+        timeout: 120000,
+        onload: function (r) {
+          if ((r.status === 206 || r.status === 200) && r.response) resolve(r.response);
+          else reject(new Error('分段下载失败 HTTP ' + r.status));
+        },
+        onerror: function () { reject(new Error('分段下载网络错误')); },
+        ontimeout: function () { reject(new Error('分段下载超时')); }
+      });
+    });
+  }
+
+  // 列出文件头里的顶层盒子
+  function listBoxes(buf) {
+    var view = new DataView(buf);
+    var out = [], p = 0, end = buf.byteLength, guard = 0;
+    while (p + 8 <= end && guard++ < 5000) {
+      var size = view.getUint32(p);
+      var type = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5), view.getUint8(p + 6), view.getUint8(p + 7));
+      if (size === 1) { size = Number(view.getBigUint64(p + 8)); }
+      if (size === 0) size = end - p;
+      if (size < 8 || p + size > end) break;
+      out.push({ off: p, size: size, type: type });
+      p += size;
+    }
+    return out;
+  }
+
+  // 解析 sidx（分片目录）
+  function parseSidx(buf, off) {
+    var view = new DataView(buf);
+    var version = view.getUint8(off + 8);
+    var p = off + 12;                     // 跳过 size(4) type(4) version(1) flags(3)
+    p += 4;                               // reference_ID
+    var timescale = view.getUint32(p); p += 4;
+    var earliest = 0, firstOffset = 0;
+    if (version === 0) {
+      earliest = view.getUint32(p); p += 4;
+      firstOffset = view.getUint32(p); p += 4;
+    } else {
+      earliest = Number(view.getBigUint64(p)); p += 8;
+      firstOffset = Number(view.getBigUint64(p)); p += 8;
+    }
+    p += 2;                               // reserved
+    var count = view.getUint16(p); p += 2;
+    var list = [], t = earliest;
+    for (var i = 0; i < count; i++) {
+      var w1 = view.getUint32(p); p += 4;
+      var dur = view.getUint32(p); p += 4;
+      p += 4;                             // SAP 信息
+      list.push({ size: w1 & 0x7FFFFFFF, startSec: t / timescale, durSec: dur / timescale });
+      t += dur;
+    }
+    return { timescale: timescale, count: count, list: list, totalSec: t / timescale };
+  }
+
+  // 探测分片表：读文件头 → 找 sidx → 算出每一片的字节位置与时间起点
+  async function probeSegments(url) {
+    var head = await fetchRange(url, 0, SEG_HEAD_BYTES - 1);
+    var boxes = listBoxes(head);
+    var sidxBox = null;
+    for (var i = 0; i < boxes.length; i++) if (boxes[i].type === 'sidx') sidxBox = boxes[i];
+    if (!sidxBox) throw new Error('没有分片目录 sidx，该音频不支持分段解码');
+    var sidx = parseSidx(head, sidxBox.off);
+    if (!sidx.count) throw new Error('分片目录为空');
+    var initEnd = sidxBox.off + sidxBox.size;
+    var segs = [], off = initEnd;
+    for (var k = 0; k < sidx.list.length; k++) {
+      var s = sidx.list[k];
+      segs.push({ off: off, size: s.size, startSec: s.startSec, durSec: s.durSec });
+      off += s.size;
+    }
+    return { initEnd: initEnd, segs: segs, totalSec: sidx.totalSec, bytes: off };
+  }
+
+  // AudioBuffer -> 单声道 Float32（立体声取左右平均，不丢内容）
+  function toMono(buffers) {
+    var total = 0, i;
+    for (i = 0; i < buffers.length; i++) total += buffers[i].length;
+    var out = new Float32Array(total), o = 0;
+    for (i = 0; i < buffers.length; i++) {
+      var b = buffers[i];
+      var ch0 = b.getChannelData(0);
+      if (b.numberOfChannels > 1) {
+        var ch1 = b.getChannelData(1);
+        for (var j = 0; j < b.length; j++) out[o + j] = (ch0[j] + ch1[j]) * 0.5;
+      } else {
+        out.set(ch0, o);
+      }
+      o += b.length;
+    }
+    return out;
+  }
+
+  // 分段解码主流程：并发下载 → 逐片解码 → 攒批识别 → 精确时间戳
+  async function segmentAsr(url, info, myGen) {
+    var initBuf = await fetchRange(url, 0, info.initEnd - 1);
+    if (asrStop(myGen)) return [];
+
+    // 按时间攒批
+    var batches = [], cur = null;
+    for (var i = 0; i < info.segs.length; i++) {
+      var s = info.segs[i];
+      if (!cur || (s.startSec + s.durSec - cur.startSec) > SEG_BATCH_SEC) {
+        cur = { startSec: s.startSec, endSec: s.startSec + s.durSec, items: [] };
+        batches.push(cur);
+      }
+      cur.items.push(s);
+      cur.endSec = s.startSec + s.durSec;
+    }
+
+    state.asr.stage = 'transcribe';
+    state.asr.total = batches.length;
+    state.asr.done = 0;
+    state.asr.chunks = batches.map(function (b) { return { i: 0, start: b.startSec, state: 'queued' }; });
+    render();
+
+    var segsAll = [];
+
+    // 并发下载一批分片
+    async function fetchBatch(items) {
+      var out = new Array(items.length), idx = 0;
+      async function worker() {
+        while (idx < items.length) {
+          if (asrStop(myGen)) return;
+          var i = idx++;
+          out[i] = await fetchRange(url, items[i].off, items[i].off + items[i].size - 1);
+        }
+      }
+      var ws = [];
+      for (var w = 0; w < Math.min(SEG_CONCURRENCY, items.length); w++) ws.push(worker());
+      await Promise.all(ws);
+      return out;
+    }
+
+    for (var bi = 0; bi < batches.length; bi++) {
+      if (asrStop(myGen)) break;
+      var b = batches[bi];
+      if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'working';
+      state.asr.phase = '分段解码中（第 ' + (bi + 1) + '/' + batches.length + ' 批，每批约 ' + Math.round(SEG_BATCH_SEC / 60) + ' 分钟音频）';
+      state.asr.progress = null;
+      render();
+
+      var raws = await fetchBatch(b.items);
+      if (asrStop(myGen)) break;
+
+      // 逐片解码（每片 = 说明书 + 该片数据）
+      var decoded = [];
+      var okAll = true;
+      for (var di = 0; di < raws.length; di++) {
+        if (asrStop(myGen)) { okAll = false; break; }
+        if (!raws[di]) continue;
+        try {
+          var blob = new Blob([initBuf, raws[di]], { type: 'audio/mp4' });
+          decoded.push(await decodeAudio(blob));
+        } catch (eSeg) {
+          log('第 ' + bi + ' 批第 ' + di + ' 片解码失败', eSeg);
+        }
+      }
+      if (!okAll || asrStop(myGen)) break;
+      if (!decoded.length) {
+        if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'fail';
+        state.asr.done = bi + 1;
+        render();
+        continue;
+      }
+
+      var mono = toMono(decoded);
+      var wav = pcm16kToWav(mono);
+      var txt = await transcribeWav(wav, 'seg.wav');
+      if (asrStop(myGen)) break;
+
+      var segs = parseSrt(txt);
+      if (!segs.length) segs = splitTextByTime(txt, b.startSec, b.endSec);
+      segs.forEach(function (x) { x.from += b.startSec; x.to += b.startSec; });   // 批起点是 sidx 给的精确时间
+      segsAll = segsAll.concat(segs);
+      if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'done';
+      state.asr.done = bi + 1;
+      state.asr.preview = segsAll.slice(-40);
+      render();
+    }
+
+    if (segsAll.length && state.asr) state.asr.progress = 100;
+    return segsAll;
   }
 
   // ===================== 播放录制兜底通道（decode 失败 / 超大音频自动启用） =====================

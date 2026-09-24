@@ -46,7 +46,8 @@ const funcs = [
   'parseSrt', 'vttTime', 'parseVtt', 'ttmlTime', 'parseTtml',
   'mergeBodies', 'splitTextByTime',
   'wavFromBuffer',
-  'probeMime', 'guessDuration', 'estimateDecodedMB', 'shouldUseRecord', 'probeMp4Channels'
+  'probeMime', 'guessDuration', 'estimateDecodedMB', 'shouldUseRecord', 'probeMp4Channels',
+  'listBoxes', 'parseSidx', 'toMono'
 ];
 const vars = [
   extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache'),
@@ -55,7 +56,7 @@ const vars = [
   extractVarValue('PCM_BYTES_PER_SEC_STEREO'), extractVarValue('RECORD_THRESHOLD_MB')
 ];
 const code = 'var SETTINGS = { asrLongMode: "auto" };\n' + vars.concat(funcs.map(extractFunc)).join('\n');
-const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, guessDuration, estimateDecodedMB, shouldUseRecord, probeMp4Channels, DECODE_RATE, PCM_BYTES_PER_SEC_MONO, PCM_BYTES_PER_SEC_STEREO, RECORD_THRESHOLD_MB, SETTINGS, wbiCache };')();
+const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, guessDuration, estimateDecodedMB, shouldUseRecord, probeMp4Channels, listBoxes, parseSidx, toMono, DECODE_RATE, PCM_BYTES_PER_SEC_MONO, PCM_BYTES_PER_SEC_STEREO, RECORD_THRESHOLD_MB, SETTINGS, wbiCache };')();
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -388,6 +389,78 @@ test('MIME 自愈不再依赖被 detach 的 buffer', () => {
 test('胶囊与悬浮按钮二选一显示，不再互相遮挡', () => {
   const fn = extractFunc('render');
   assert.ok(/classList\.contains\('show'\)/.test(fn), 'render 应判断面板是否展开');
+});
+
+console.log('== v9.0 分段解码（分片目录解析 / 顶盒遍历）==');
+test('parseSidx: 从分片目录读出片数、时长与字节大小', () => {
+  const timescale = 48000;
+  const refs = [
+    { size: 43091, dur: 240480 },   // 5.01 秒
+    { size: 41231, dur: 240480 },
+    { size: 40999, dur: 240480 }
+  ];
+  const body = Buffer.alloc(24 + refs.length * 12);
+  body.writeUInt8(0, 0);            // version = 0
+  body.writeUInt32BE(1, 4);         // reference_ID
+  body.writeUInt32BE(timescale, 8);
+  body.writeUInt32BE(0, 12);        // earliest_presentation_time
+  body.writeUInt32BE(0, 16);        // first_offset
+  body.writeUInt16BE(refs.length, 22);
+  let p = 24;
+  refs.forEach((r) => {
+    body.writeUInt32BE(r.size, p); p += 4;
+    body.writeUInt32BE(r.dur, p); p += 4;
+    body.writeUInt32BE(0, p); p += 4;
+  });
+  const box = Buffer.alloc(8 + body.length);
+  box.writeUInt32BE(8 + body.length, 0);
+  box.write('sidx', 4, 'ascii');
+  body.copy(box, 8);
+  const ab = box.buffer.slice(box.byteOffset, box.byteOffset + box.length);
+  const s = scope.parseSidx(ab, 0);
+  assert.strictEqual(s.count, 3);
+  assert.strictEqual(s.timescale, 48000);
+  assert.strictEqual(s.list[0].size, 43091);
+  assert.ok(Math.abs(s.list[0].durSec - 5.01) < 0.01, '单片时长应约 5.01 秒，实际 ' + s.list[0].durSec);
+  assert.ok(Math.abs(s.list[1].startSec - 5.01) < 0.01, '第二片起点应接着第一片');
+  assert.ok(Math.abs(s.totalSec - 15.03) < 0.05, '总时长应约 15 秒，实际 ' + s.totalSec);
+});
+test('listBoxes: 按顺序列出顶层盒子并给出字节偏移', () => {
+  function mkbox(type, len) { const b = Buffer.alloc(8 + len); b.writeUInt32BE(8 + len, 0); b.write(type, 4, 'ascii'); return b; }
+  const mp4 = Buffer.concat([mkbox('ftyp', 24), mkbox('moov', 100), mkbox('sidx', 20), mkbox('moof', 8), mkbox('mdat', 40)]);
+  const ab = mp4.buffer.slice(mp4.byteOffset, mp4.byteOffset + mp4.length);
+  const list = scope.listBoxes(ab);
+  assert.strictEqual(list.map((x) => x.type).join(','), 'ftyp,moov,sidx,moof,mdat');
+  assert.strictEqual(list[2].off, 32 + 108, 'sidx 起点应为前两个盒子长度之和');
+});
+test('toMono: 立体声取左右平均，单声道原样拼接', () => {
+  function fakeBuf(chans) {
+    return { length: 2, numberOfChannels: chans.length, getChannelData: (i) => chans[i] };
+  }
+  const stereo = scope.toMono([fakeBuf([new Float32Array([1, 0]), new Float32Array([0, 1])])]);
+  assert.strictEqual(stereo[0], 0.5);
+  assert.strictEqual(stereo[1], 0.5);
+  // Float32 存 0.4 会变成 0.40000000596…，必须用近似比较
+  const mono = scope.toMono([fakeBuf([new Float32Array([0.2, 0.4])])]);
+  assert.ok(Math.abs(mono[1] - 0.4) < 1e-6, '单声道应原样拼过来，实际 ' + mono[1]);
+});
+test('runAsr 里分段路排在最前，且失败会回落（不能一条路堵死）', () => {
+  const fn = extractFunc('runAsr');
+  assert.ok(/await probeSegments\(audioUrl\)/.test(fn), 'runAsr 应调用 probeSegments');
+  assert.ok(/segBody = await segmentAsr\(/.test(fn), 'runAsr 应调用 segmentAsr');
+  assert.ok(/catch \(eSeg\)/.test(fn), '分段路失败应被捕获后回落');
+  assert.ok(/SETTINGS\.asrLongMode !== 'record'/.test(fn), '用户强制播放录制时应跳过分段路');
+});
+test('分段解码按 Range 请求分片，并使用 arraybuffer 接收', () => {
+  const fn = extractFunc('fetchRange');
+  assert.ok(/'Range': 'bytes=' \+ start \+ '-' \+ end/.test(fn), '应带 Range 头');
+  assert.ok(/responseType: 'arraybuffer'/.test(fn), '应以 arraybuffer 接收');
+  assert.ok(/r\.status === 206/.test(fn), '应接受 206 部分内容');
+});
+test('分段解码的批次上限常量合理（控制内存与调用次数）', () => {
+  const fn = extractFunc('segmentAsr');
+  assert.ok(/SEG_BATCH_SEC/.test(fn), '应按批攒够 SEG_BATCH_SEC 秒再送识别');
+  assert.ok(/SEG_CONCURRENCY/.test(fn), '应并发下载分片');
 });
 
 console.log('== 多 P 视频切 P 字幕刷新（v8.1.8 回归）==');

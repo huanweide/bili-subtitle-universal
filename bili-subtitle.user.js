@@ -2,7 +2,7 @@
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
 // @version      9.0.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（16kHz 直解省 5.5 倍内存 + 真实时长选路 + 转写全程静音 + 四阶段进度，3 小时长音频稳跑）；可选高质量翻译。
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -27,6 +27,8 @@
 // @updateURL    https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js
 // @downloadURL  https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js
 // @supportURL   https://github.com/huanweide/bili-subtitle-universal/issues
+// @homepageURL  https://github.com/huanweide/bili-subtitle-universal
+// @license      MIT
 // ==/UserScript==
 
 (function () {

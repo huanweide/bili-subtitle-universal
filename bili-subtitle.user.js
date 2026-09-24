@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      8.2.0
+// @version      8.2.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（16kHz 直解省 5.5 倍内存 + 真实时长选路 + 转写全程静音 + 四阶段进度，3 小时长音频稳跑）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -668,17 +668,20 @@
   // blob -> AudioBuffer（一次性完整解码；失败自动用魔数修正 MIME 重试一次）
   function decodeAudio(blob) {
     return blob.arrayBuffer().then(function (buf) {
+      var head = null;
+      try { head = buf.slice(0, 16); } catch (eH) {}   // 先留头字节，解码会 detach 原 buffer
       function tryDecode(ab, mime) {
         var Ctx = window.OfflineAudioContext || window.AudioContext || window.webkitAudioContext;
         var ctx = new Ctx(1, 1, DECODE_RATE);
         return ctx.decodeAudioData(ab);
       }
       return tryDecode(buf, blob.type).catch(function (err) {
-        var real = probeMime(buf);
+        // decodeAudioData 会把传进去的 ArrayBuffer detach 掉，所以：
+        // ① 魔数探测要用事先留存的头字节；② 重试必须从 blob 重新读一份，否则传进去的是空壳
+        var real = head ? probeMime(head) : null;
         if (real && real !== (blob.type || '').split(';')[0].trim().toLowerCase()) {
           log('MIME 误标修正重试：' + blob.type + ' -> ' + real);
-          var fixed = new Blob([buf], { type: real });
-          return tryDecode(buf, real);
+          return blob.arrayBuffer().then(function (buf2) { return tryDecode(buf2, real); });
         }
         throw err;
       });
@@ -697,11 +700,13 @@
 
   // 预估「整体解码后」的 PCM 占用。v8.2.0 起解码目标是 16000 单声道，每秒只占 64KB。
   // 传真实时长（audio 元数据探测到的）最准；拿不到才退回按码率猜。
-  function estimateDecodedMB(blob, realDurSec) {
+  function estimateDecodedMB(blob, realDurSec, channels) {
     try {
       var durSec = (Number(realDurSec) > 0) ? Number(realDurSec) : guessDuration(blob);
-      return Math.round(durSec * PCM_BYTES_PER_SEC / (1024 * 1024));
-    } catch (e) { return Math.round(blob.size / (1024 * 1024) * 8); }
+      // 声道数未知时按立体声保守算：宁可高估、早点退回稳路，也不要低估撞 OOM 崩掉整个页面
+      var perSec = (Number(channels) === 1) ? PCM_BYTES_PER_SEC_MONO : PCM_BYTES_PER_SEC_STEREO;
+      return Math.round(durSec * perSec / (1024 * 1024));
+    } catch (e) { return Math.round(blob.size / (1024 * 1024) * 16); }
   }
 
   // 读音频真实时长：借一个隐藏 audio 元素只读元数据（preload=metadata + 静音，不会出声）
@@ -727,13 +732,13 @@
     });
   }
 
-  function shouldUseRecord(blob, realDurSec) {
+  function shouldUseRecord(blob, realDurSec, channels) {
     if (SETTINGS.asrLongMode === 'record') return true;
     if (SETTINGS.asrLongMode === 'decode') return false;
     // auto：解码后预估超过 800MB 才走「播放录制」。
-    // 旧版 44100 双声道解码要 6 倍内存，120MB 的源文件就得退录制；v8.2 解码目标改 16000 单声道后，同样内容省 5.5 倍。
+    // 旧版 44100 双声道解码 3 小时要 3.8GB；v8.2 降到 16000 后省 2.75 倍（立体声）/ 5.5 倍（单声道）。
     if (blob.size >= 300 * 1024 * 1024) return true;   // 硬保险：源文件本身太大
-    return estimateDecodedMB(blob, realDurSec) > RECORD_THRESHOLD_MB;
+    return estimateDecodedMB(blob, realDurSec, channels) > RECORD_THRESHOLD_MB;
   }
   function decodeFailReason(e, blob) {
     var m = String((e && e.message) || e);
@@ -799,8 +804,64 @@
   // 旧版用 44100 双声道解码，3 小时音频解出约 3.8GB PCM，内存必爆，只能退回「播放录制」（要真放 13 分钟）；
   // 改 16000 单声道后同样内容只占约 691MB（省 5.5 倍），3 小时音频可走「快路」直接解码切片，几十秒出结果。
   var DECODE_RATE = 16000;
-  var PCM_BYTES_PER_SEC = DECODE_RATE * 4;   // 单声道 Float32：每秒 64000 字节
+  // 注意：decodeAudioData 只按上下文采样率重采样，**不会把立体声降成单声道**，
+  // 所以解码后的声道数跟随源文件。估算必须按真实声道数算，否则立体声长音频会低估一半、直接撞 OOM。
+  var PCM_BYTES_PER_SEC_MONO = DECODE_RATE * 4;       // 单声道 Float32：每秒 64000 字节
+  var PCM_BYTES_PER_SEC_STEREO = DECODE_RATE * 4 * 2; // 立体声：每秒 128000 字节
   var RECORD_THRESHOLD_MB = 800;             // 解码后预估超过该值才走「播放录制」兜底
+
+  // 从 MP4 容器的 stsd > mp4a 里读声道数（B 站 dash 音频的 moov 在文件开头，读前 256KB 足够）
+  // 拿不到就返回 0，调用方按立体声保守处理
+  function probeMp4Channels(buf) {
+    try {
+      var view = new DataView(buf);
+      // 容器盒子：stsd 藏在 moov > trak > mdia > minf > stbl 里面，必须逐层钻进去找，不能平铺扫
+      var CONTAINERS = { moov: 1, trak: 1, mdia: 1, minf: 1, stbl: 1, edts: 1, dinf: 1 };
+      function scan(start, end, depth) {
+        if (depth > 8) return 0;
+        var p = start, guard = 0;
+        while (p + 8 <= end && guard++ < 4000) {
+          var size = view.getUint32(p);
+          var type = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5), view.getUint8(p + 6), view.getUint8(p + 7));
+          var body = p + 8;
+          if (size === 1) { size = Number(view.getBigUint64(p + 8)); body = p + 16; }
+          if (size === 0) size = end - p;
+          if (size < 8 || p + size > end) break;
+          if (type === 'stsd') {
+            var q = body + 8;   // 跳过 version+flags(4) 与 entry_count(4)，指向第一个样本描述
+            if (q + 26 <= end) {
+              var eType = String.fromCharCode(view.getUint8(q + 4), view.getUint8(q + 5), view.getUint8(q + 6), view.getUint8(q + 7));
+              if (eType === 'mp4a' || eType === 'enca' || eType === 'ac-3' || eType === 'ec-3') {
+                return view.getUint16(q + 24);   // audio sample entry 偏移 24 处是 channelcount
+              }
+            }
+          }
+          if (CONTAINERS[type]) {
+            var got = scan(body, p + size, depth + 1);
+            if (got) return got;
+          }
+          p += size;
+        }
+        return 0;
+      }
+      return scan(0, buf.byteLength, 0);
+    } catch (e) { return 0; }
+  }
+
+  // 读音频声道数：先看容器（MP4），拿不到返回 0（调用方按立体声保守算）
+  async function probeAudioChannels(blob) {
+    try {
+      var t = (blob.type || '').toLowerCase();
+      if (t.indexOf('mp4') < 0 && t.indexOf('m4a') < 0 && t.indexOf('aac') < 0 && t.indexOf('octet') >= 0 && t.indexOf('mp4') < 0) {
+        // 非 MP4 容器（webm/ogg/mp3）暂不解析，交给保守估算
+        var head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+        var isMp4 = head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70;
+        if (!isMp4) return 0;
+      }
+      var buf = await blob.slice(0, 262144).arrayBuffer();
+      return probeMp4Channels(buf) || 0;
+    } catch (e) { return 0; }
+  }
 
   function fmtDur(sec) {
     sec = Math.round(sec);
@@ -895,9 +956,15 @@
         if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
         state.audioDurSec = probedDur || (state.duration || 0);
       }
+      if (!state.audioCh) {
+        // 声道数决定解码内存：decodeAudioData 不会把立体声降成单声道，必须知道真实声道数
+        state.audioCh = await probeAudioChannels(blob);
+        if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+      }
       state.audioSizeMB = Math.round(blob.size / (1024 * 1024));
       state.asr.durSec = state.audioDurSec;
       state.asr.sizeMB = state.audioSizeMB;
+      state.asr.ch = state.audioCh;
       render();
 
       var body = [];
@@ -921,14 +988,20 @@
       // ② 大文件 / 直传失败：优先「整体解码分片」（秒级）；解码失败或音频超大自动降级「播放录制」（稳）
       if (!body.length) {
         var audioBuf = null;
-        var useRec = shouldUseRecord(blob, state.audioDurSec);
+        var useRec = shouldUseRecord(blob, state.audioDurSec, state.audioCh);
         if (!useRec) {
           state.asr.stage = 'decode';
-          state.asr.phase = '解码音频到 16kHz（约 ' + estimateDecodedMB(blob, state.audioDurSec) + 'MB 内存）';
+          state.asr.phase = '解码音频到 16kHz' + (state.audioCh === 1 ? '单声道' : '') + '（约 ' + estimateDecodedMB(blob, state.audioDurSec, state.audioCh) + 'MB 内存）';
           state.asr.progress = null; render();
           try {
             audioBuf = state.audioBuf || await decodeAudio(blob);
             state.audioBuf = audioBuf;
+            // 复核：解码结果的真实声道数可能与估算不符，超阈值就提示（已解出来的内存无法退回，但至少让用户知道风险）
+            if (audioBuf && audioBuf.numberOfChannels > 1 && state.audioCh !== 2) {
+              state.audioCh = audioBuf.numberOfChannels;
+              var realMB = estimateDecodedMB(blob, state.audioDurSec, state.audioCh);
+              log('解码结果实际为 ' + state.audioCh + ' 声道，占用约 ' + realMB + 'MB');
+            }
           } catch (eDec) {
             if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
             log('整体解码失败（' + decodeFailReason(eDec, blob) + '），自动降级播放录制', eDec);
@@ -1005,7 +1078,7 @@
       state.asr.phase = '合并时间轴并排序';
       render();
       var merged = mergeBodies([{ body: body }]);
-      merged.incomplete = false;
+      merged.incomplete = !!(body && body.incomplete);   // 录制中途收尾时如实标记，界面会提示「字幕可能不完整」
       state.body = merged;
       state.lan = 'ASR·' + (SETTINGS.asrLang === 'auto' ? '自动' : (LANG_NAMES[SETTINGS.asrLang] || SETTINGS.asrLang));
       cache[ck] = merged;
@@ -1055,7 +1128,15 @@
   // 它跑在音频独立线程，主线程再卡也不丢采样点（旧版 ScriptProcessor 跑在主线程，页面一卡就断一段声音）。
   var WORKLET_SRC = [
     'class BsrTap extends AudioWorkletProcessor {',
-    '  constructor() { super(); this.buf = new Float32Array(16384); this.n = 0; }',
+    '  constructor() {',
+    '    super();',
+    '    this.buf = new Float32Array(16384);',
+    '    this.n = 0;',
+    '    var self = this;',
+    '    this.port.onmessage = function (e) {',
+    '      if (e.data && e.data.flush && self.n > 0) { self.port.postMessage(self.buf.slice(0, self.n)); self.n = 0; }',
+    '    };',
+    '  }',
     '  process(inputs) {',
     '    var inp = inputs[0];',
     '    if (!inp || !inp.length || !inp[0]) return true;',
@@ -1119,6 +1200,8 @@
       if (typeof audio.captureStream !== 'function' && typeof audio.mozCaptureStream !== 'function' && typeof audio.msCaptureStream !== 'function') {
         stopRecorder(); throw new Error('当前浏览器不支持音频抓取（播放录制兜底），请用最新 Chrome / Edge');
       }
+      // 这条路上元素的输出没被 Web Audio 接管，图内的静音节点管不到它 → 必须直接把元素音量关掉
+      audio.volume = 0;
       var stream = audio.captureStream ? audio.captureStream() : (audio.mozCaptureStream ? audio.mozCaptureStream() : audio.msCaptureStream());
       srcNode = ctx.createMediaStreamSource(stream);
     }
@@ -1137,6 +1220,15 @@
     var sliceAt = Math.max(16000, Math.round(chunkSecOrig / RATE * 16000 * 0.98)); // 攒到该样本数切一片
     var cursorOrig = 0, lastUi = 0, naturalEnd = false, stopNow = false, pending = [], consumerPromise = null, consumerErr = null;
     var pauseGate = false;   // 背压闸门：切片积压时暂停播放，等转写完再继续（内存不涨）
+    var playedToEnd = false; // 是否真的播到音频结尾（决定要不要做时间轴对账）
+
+    // 背压复位：切片消化到 ≤1 片就恢复播放（audio.play() 返回 Promise，必须接住拒绝）
+    function maybeResume() {
+      if (pauseGate && pending.length <= 1 && !naturalEnd) {
+        pauseGate = false;
+        audio.play().catch(function () {});
+      }
+    }
 
     function takeSlice() {
       if (!outLen) return;
@@ -1184,13 +1276,13 @@
     }
 
     // 优先装 AudioWorklet（音频线程，页面卡顿不丢数据）；不支持就退回 ScriptProcessor（老写法）
-    var tapReady = false;
+    var tapReady = false, tapNode = null;
     if (ctx.audioWorklet && typeof AudioWorkletNode === 'function') {
       try {
         var wUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
-        await ctx.audioWorklet.addModule(wUrl);
-        try { URL.revokeObjectURL(wUrl); } catch (e) {}
-        var tapNode = new AudioWorkletNode(ctx, 'bsr-tap');
+        try { await ctx.audioWorklet.addModule(wUrl); }
+        finally { try { URL.revokeObjectURL(wUrl); } catch (eU) {} }
+        tapNode = new AudioWorkletNode(ctx, 'bsr-tap');
         tapNode.port.onmessage = function (ev) { feedPcm(ev.data, null); };
         srcNode.connect(tapNode);
         tapNode.connect(muteNode);   // 接在静音节点上游，保证它处于「活」的音频路径上
@@ -1224,7 +1316,7 @@
             try { audio.pause(); } catch (eB) {}
           }
           var c = pending.shift();
-          if (!c || c.samples.length < 8000) continue;   // <0.5s 忽略
+          if (!c || c.samples.length < 8000) { maybeResume(); continue; }   // <0.5s 忽略（也不能漏掉背压复位）
           if (asrStop(myGen)) break;
           state.asr.phase = '🎙 播放录制转写（' + RATE + ' 倍速）'; state.asr.progress = null;
           render();
@@ -1256,10 +1348,7 @@
           state.asr.total = Math.max(state.asr.total || 1, state.asr.done);
           // 实时字幕流：把刚转好的几句挂到界面上，边转边长（3 小时也看得见进展）
           state.asr.preview = segsAll.slice(-40);
-          if (pauseGate && pending.length <= 1 && !naturalEnd) {
-            pauseGate = false;
-            try { audio.play(); } catch (eR) {}
-          }
+          maybeResume();
           render();
         }
       } catch (e) {
@@ -1269,7 +1358,7 @@
       } finally {
         // 关键兜底：消费者无论怎么退出，都必须解除背压。
         // 否则 audio 会被永久暂停，而主等待循环看到 pauseGate 就一直不累计停滞 → 死锁。
-        if (pauseGate) { pauseGate = false; try { audio.play(); } catch (eF) {} }
+        if (pauseGate) { pauseGate = false; audio.play().catch(function () {}); }
       }
     })();
 
@@ -1312,7 +1401,7 @@
         if (asrStop(myGen)) { clearInterval(iv); res(); return; }
         if (naturalEnd) { clearInterval(iv); res(); return; }
         var t = audio.currentTime;
-        if (audio.ended || t >= totalDur - 0.1) { naturalEnd = true; clearInterval(iv); res(); return; }
+        if (audio.ended || t >= totalDur - 0.1) { playedToEnd = true; naturalEnd = true; clearInterval(iv); res(); return; }
         // v8.2.0 防「误判收工」：旧版只认「播放位置 5 秒不动」就判定放完了，
         // 3 小时长音频一次缓冲抖动就被提前截断（这是 3H 只转出开头一截的主因之一）。
         // 新版看两层：位置在动，或缓冲末尾还在往前长 / 还没缓冲够，都算「在推进」；
@@ -1326,6 +1415,10 @@
         if (stallN >= 80) { naturalEnd = true; clearInterval(iv); res(); }
       }, 250);
     });
+    // AudioWorklet 最后一块不满 16384 的缓冲要显式冲出来，否则结尾最多丢 0.34 秒
+    if (tapNode && tapNode.port) {
+      try { tapNode.port.postMessage({ flush: true }); await sleep(150); } catch (eFl) {}
+    }
     try { if (proc) proc.disconnect(); if (srcNode) srcNode.disconnect(); } catch (e) {}
     takeSlice();   // 收尾：不足一片的剩余音频
     stopNow = true;
@@ -1333,8 +1426,14 @@
     if (consumerErr && !asrStop(myGen)) {
       toast('⚠ 播放录制中途出错（' + (consumerErr.message || consumerErr) + '），已保留成功转写部分');
     }
-    // 对账：极少数浏览器 captureStream 不跟随倍速导致时间轴整体偏差 → 线性修正
-    if (naturalEnd && segsAll.length && cursorOrig > totalDur * 0.5 && Math.abs(totalDur / cursorOrig - 1) > 0.05) {
+    // 对账：只有「确实播到结尾」才纠正倍速带来的整体偏差。
+    // 中途停滞/异常收尾时 cursorOrig 明显小于总长，这时缩放会把半截字幕拉满整条时间轴，
+    // 变成越往后越对不上的假时间轴——那种情况保持原样，并标记不完整供界面提示。
+    if (!playedToEnd && segsAll.length && totalDur > 0 && cursorOrig < totalDur * 0.9) {
+      segsAll.incomplete = true;
+      log('录制提前收尾：已转 ' + Math.round(cursorOrig) + 's / 共 ' + Math.round(totalDur) + 's，标记为不完整');
+    }
+    if (naturalEnd && playedToEnd && segsAll.length && cursorOrig > totalDur * 0.5 && Math.abs(totalDur / cursorOrig - 1) > 0.05) {
       var scale = totalDur / cursorOrig;
       log('录制时间轴对账修正 ×' + scale.toFixed(3));
       segsAll.forEach(function (s) { s.from = Math.min(totalDur, s.from * scale); s.to = Math.min(totalDur, s.to * scale); });
@@ -1705,12 +1804,12 @@
 
     root.querySelector('#bsr-fab').onclick = function () { root.querySelector('#bsr-panel').classList.toggle('show'); };
     // 胶囊：转写中把面板收成一个小圆条，不挡视频；点一下再展开
+    // 点小条 = 展开面板（小条只在面板收起时出现，不存在「收起小条」这个动作）
     root.querySelector('#bsrMini').onclick = function () {
-      root.querySelector('#bsrMini').style.display = 'none';
-      root.querySelector('#bsr-fab').style.display = 'block';
       root.querySelector('#bsr-panel').classList.add('show');
+      render();
     };
-    root.querySelector('#bsrClose').onclick = function () { root.querySelector('#bsr-panel').classList.remove('show'); };
+    root.querySelector('#bsrClose').onclick = function () { root.querySelector('#bsr-panel').classList.remove('show'); render(); };
     root.querySelector('#bsrGet').onclick = function () { getSubtitles(); };
     root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(state.body) : getVideoInfoText()); };
     root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(state.body)); };
@@ -1804,6 +1903,9 @@
       else sub = 1;
       var rng = stageRange(stg);
       var pct = Math.round(rng[0] + (rng[1] - rng[0]) * Math.max(0, Math.min(1, sub)));
+      // 单调保护：降级路径（直传失败转解码、解码失败转录制）会让阶段边界回退，
+      // 进度条倒退会让人以为出错了。这里只许前进不许后退。
+      if (a._pct != null && pct < a._pct) pct = a._pct; else a._pct = pct;
       box.style.display = 'block';
       $('#bsrBarFill').style.width = pct + '%';
 
@@ -1856,13 +1958,19 @@
       } else $('#bsrChunks').style.display = 'none';
 
       prog.textContent = '';
-      // 胶囊小条：面板关着也能看到进度，不挡视频
-      mini.style.display = 'block';
-      mini.textContent = '🎧 ' + pct + '%' + (etaSec > 0 ? ' · 约 ' + Math.max(1, Math.round(etaSec / 60)) + ' 分钟' : '');
+      // 胶囊小条与悬浮按钮二选一：面板开着显示按钮，面板收着显示小条（转写中），永不重叠遮挡
+      var panelShown = $('#bsr-panel').classList.contains('show');
+      if (panelShown) { mini.style.display = 'none'; $('#bsr-fab').style.display = 'block'; }
+      else {
+        mini.style.display = 'block';
+        $('#bsr-fab').style.display = 'none';
+        mini.textContent = '🎧 ' + pct + '%' + (etaSec > 0 ? ' · 约 ' + Math.max(1, Math.round(etaSec / 60)) + ' 分钟' : '');
+      }
     } else {
       prog.textContent = '';
       box.style.display = 'none';
       mini.style.display = 'none';
+      $('#bsr-fab').style.display = 'block';
     }
     $('#bsrOut').value = state.body ? bodyToTxt(state.body) : (state.noSub ? getVideoInfoText() : '');
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');
@@ -1927,6 +2035,7 @@
     state.adapter = null; state.cid = null; state.videoId = '';
     state.subs = []; state.body = null; state.lan = ''; state.err = ''; state.noSub = false; state.loading = false; state.asr = null; state.asrRan = false;
     state.bvid = ''; state.aid = ''; state.title = ''; state.up = ''; state.desc = ''; state.duration = 0;
+    state.audioDurSec = 0; state.audioSizeMB = 0; state.audioCh = 0;   // 切视频必须清：否则下一条视频沿用上一条的时长，选路全错
     state.page = 1; state.pageTitle = ''; state.totalPages = 1;
     var m = location.pathname.match(/BV\w+/);
     if (m) state.bvid = m[0];

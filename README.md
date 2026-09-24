@@ -2,9 +2,9 @@
 
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
-[![version](https://img.shields.io/badge/version-8.2.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-8.2.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-54%2F54-3a8ee6)](tests/run-tests.js)
+[![tests](https://img.shields.io/badge/tests-69%2F69-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
 
 ---
@@ -27,7 +27,7 @@
 |---|---|
 | **全网通用，不是一个站的专用工具** | B 站（含登录态 AI 字幕）、YouTube（含自动字幕）、任意网页 `<video>` 的 WebVTT，三套适配器自动认领 |
 | **没有字幕才是它的主场** | 内置硅基流动 SenseVoice 云转写，把「无字幕视频」这条死路接活 |
-| **3 小时长音频真的能跑完** | v8.2.0 把解码目标改成 16kHz 单声道，内存占用直接砍到 1/5.5，3 小时音频从「必崩」变成「几十秒解完」 |
+| **3 小时长音频真的能跑完** | 解码目标降到 16kHz（立体声省 2.75 倍、单声道省 5.5 倍），再配合真实时长 + 真实声道数精准选路，3 小时音频从「必崩」变成「几十秒解完」 |
 | **转写时一声不响** | 播放全程静音，不再有倍速怪声。你甚至可以最小化页面去干别的 |
 | **进度看得见** | 五阶段进度条 + 实时字幕流（边转边长）+ 预计剩余时间 + 收起后的小胶囊 + 完成系统通知 |
 | **纯前端，密钥不出浏览器** | 没有服务器，你的 API Key 只存在 Tampermonkey 本地沙箱，不上传任何第三方 |
@@ -60,7 +60,7 @@
 ```
 
 - **整段直传**：小文件不解码，原样丢给 SenseVoice。
-- **解码切片**：一次性解码成 16kHz 单声道，按设定时长切片并行转写。**v8.2.0 把这一步的内存砍到 1/5.5**，3 小时音频从此走这条路。
+- **解码切片**：一次性解码成 16kHz，按设定时长切片并行转写。**v8.2 把这一步的内存降下来**（立体声省 2.75 倍、单声道省 5.5 倍），单声道 3 小时音频从此走这条快路。
 - **静音播放录制**：超大音频（解码后预计超 800MB）自动启用。浏览器按倍速静音播放，边播边抓边转，内存只占一片，跟视频总长无关。
 - **MIME 自愈**：文件头魔数探针（ftyp / RIFF / EBML / OggS / ID3），服务器标错类型也能纠正后重试。
 - **选路不再靠猜**：读取音频真实时长再算内存占用，避免把 3 小时当 1 小时处理。
@@ -126,8 +126,10 @@ Edge / Chrome / Firefox 应用商店搜「Tampermonkey」一键安装。
 
 | 手段 | 效果 |
 |---|---|
-| 解码目标 44100 双声道 → 16000 单声道 | 3 小时音频内存从约 3.8GB 降到约 659MB，落回「直接解码切片」快路 |
+| 解码目标 44100 → 16000 | 3 小时立体声从约 3.8GB 降到约 1.32GB，单声道降到约 659MB |
 | 读音频真实时长再选路 | 不再拿文件体积猜码率，避免把 3 小时当 1 小时 |
+| 读 MP4 容器里的真实声道数 | 估算不再少算一半；单声道长音频走解码快路，立体声超阈值走稳路 |
+| 解码完成后按实际声道复核 | 估算与真实不符时记录提示，不静默冒 OOM 风险 |
 | 抓音从 ScriptProcessor 换 AudioWorklet | 音频独立线程，页面卡顿也不丢采样点 |
 | 停滞判定看缓冲状态 | 位置与缓冲同时停 20 秒才收尾，不再误杀 |
 | 背压闸门 | 待转写切片积压就暂停播放，内存不涨 |
@@ -222,7 +224,7 @@ YouTube 音频是带签名分片的流媒体，需要解流签名才能取到。
 ## 开发与测试
 
 ```bash
-node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 长音频硬化（54 项）
+node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化（69 项）
 node tests/serve.js          # 本地静态服务，端口 8765
 ```
 

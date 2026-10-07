@@ -1,0 +1,57 @@
+{
+  "repo": "huanweide/bili-subtitle-universal",
+  "owner": "huanweide",
+  "round": 1,
+  "lastOptimized": "2026-10-07",
+  "baseline_commit": "",
+  "verdict": "keep",
+  "direction": "单点深度特化（字幕正确性：零错时 / 零丢失 / 零注入）",
+  "decision_reason": "存活评估：保留。同类替代（LiveCaptions-Translator 3811 star、abbi128/LiveCaptions 1797、Vanyoon/realtime-subtitle 223）都集中在「实时字幕叠加显示」，没有一款是「纯前端一键导出字幕 + 无字幕云转写 + 3 小时长音频稳跑」的组合；本项目的壁垒是长音频分段解码管线与三站适配器，属于空地而非红海，不存在碾压级替代。方向选择：项目文档/CI/测试已相当成熟（86 项测试、CHANGELOG、CONTRIBUTING、MIT 齐全），继续做泛化补文档属于小修小补；真正的缺口在「取到的字幕是不是原字幕」这条主线上——实测发现 YouTube/通用 VTT 的结束时间恒为 0，属打脸级事故。故本轮选单点深度特化：把三大解析器的正确性钉死。",
+  "survival_check": {
+    "competitors": [
+      { "name": "SakiRinn/LiveCaptions-Translator", "stars": 3811, "note": "实时字幕翻译，Windows 11 22H2+，需本地/NPU 推理" },
+      { "name": "abbi128/LiveCaptions", "stars": 1797, "note": "Linux 无障碍实时字幕" },
+      { "name": "Vanyoon/realtime-subtitle", "stars": 223, "note": "Python 实时字幕，需本地环境" }
+    ],
+    "key_finding": "竞品全在「边看边显示」赛道，且大多要装环境或本地模型；本项目是「零后端纯油猴一键导出 + 无字幕云转写 + 3 小时长音频分段解码」，赛道不同。且作者本人每天在用，实用性与特化深度都站得住，不予舍弃。"
+  },
+  "changes": {
+    "added": [
+      "tests/check-docs.js（文档一致性门禁：版本号/测试数与源码对齐）",
+      "unescapeEntities() / escHtml() 两个纯函数",
+      "SRT_TS 时间戳常量"
+    ],
+    "modified": [
+      "bili-subtitle.user.js：parseVtt 修结束时间恒 0、跳过 NOTE/STYLE 块、解码实体；改锚点切分并保留纯数字正文",
+      "bili-subtitle.user.js：parseTtml 改走统一 unescapeEntities",
+      "bili-subtitle.user.js：ttmlTime 支持 MM:SS",
+      "bili-subtitle.user.js：字幕轨道下拉 lan/lan_doc 与实时字幕流统一过 escHtml",
+      "bili-subtitle.user.js：版本 9.0.0 → 9.0.1",
+      "README.md：测试数 54/69/75 三处漂移统一为 86，版本徽章 9.0.1，路线图补 v9.0.1",
+      "CHANGELOG.md：新增 9.0.1 条目",
+      ".github/workflows/test.yml：Node 20/22 矩阵 + 文档门禁步骤"
+    ],
+    "untouched": [
+      "音频管线 / 分段解码 / WBI 签名 / 适配器协议（不在本轮范围，未动）",
+      "UI 结构、设置项、导出格式"
+    ]
+  },
+  "self_check": {
+    "syntax": "node --check 通过",
+    "unit_tests": "86/86 通过",
+    "mutation_tests": "5/5 拦截（把 5 个 bug 分别注回源码，新测试全部变红）",
+    "doc_guard": "check-docs.js 全绿",
+    "ci": "Node 20 + 22 矩阵"
+  },
+  "known_mistakes": [
+    "首版「下拉转义」源码断言写得太松（只查 escHtml(s.lan) 是否存在），变异测试 M4 漏网；收紧成必须出现在 value 属性上 + 反向断言不得出现未转义的 s.lan 后才 5/5。教训：源码断言和逻辑断言一样，必须做变异验证。",
+    "写探针脚本时用 bash heredoc 生成 JS，单引号里的 \\s 被 JS 自身吞掉导致正则失配；改用 Write 工具落文件。"
+  ],
+  "rollback": "squash 单 commit，一条 git revert 可整体撤销",
+  "next_round_suggestions": [
+    "v9.1 分片断点续传（README 路线图已承诺）",
+    "给 parseVtt/parseSrt/parseTtml 加一份真实站点字幕的语料回归集（fixtures）",
+    "YouTube 音频解流签名（当前 YouTube 无字幕不能转写）"
+  ],
+  "next_repo_candidates": ["bilibili-comment-engine", "floatsnip", "pagext"]
+}

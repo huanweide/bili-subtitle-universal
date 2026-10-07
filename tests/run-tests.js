@@ -44,6 +44,7 @@ const funcs = [
   'getMixinKey', 'buildQs', 'wbiSign', 'wbiQuery',
   'srtTime', 'bodyToTxt', 'bodyToSrt',
   'parseSrt', 'vttTime', 'parseVtt', 'ttmlTime', 'parseTtml',
+  'unescapeEntities', 'escHtml',
   'mergeBodies', 'splitTextByTime',
   'wavFromBuffer',
   'probeMime', 'guessDuration', 'estimateDecodedMB', 'shouldUseRecord', 'probeMp4Channels',
@@ -51,12 +52,13 @@ const funcs = [
 ];
 const vars = [
   extractVarArray('MIXIN_TAB'), extractVarArray('hexChr'), extractVarObj('wbiCache'),
+  extractVarValue('SRT_TS'),
   // v8.2.0 音频解码常量（顺序不能反：PCM_BYTES_PER_SEC 依赖 DECODE_RATE）
   extractVarValue('DECODE_RATE'), extractVarValue('PCM_BYTES_PER_SEC_MONO'),
   extractVarValue('PCM_BYTES_PER_SEC_STEREO'), extractVarValue('RECORD_THRESHOLD_MB')
 ];
 const code = 'var SETTINGS = { asrLongMode: "auto" };\n' + vars.concat(funcs.map(extractFunc)).join('\n');
-const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, guessDuration, estimateDecodedMB, shouldUseRecord, probeMp4Channels, listBoxes, parseSidx, toMono, DECODE_RATE, PCM_BYTES_PER_SEC_MONO, PCM_BYTES_PER_SEC_STEREO, RECORD_THRESHOLD_MB, SETTINGS, wbiCache };')();
+const scope = new Function(code + '\n; return { md5, wbiSign, wbiQuery, getMixinKey, srtTime, bodyToTxt, bodyToSrt, parseSrt, vttTime, parseVtt, ttmlTime, parseTtml, unescapeEntities, escHtml, mergeBodies, splitTextByTime, wavFromBuffer, probeMime, guessDuration, estimateDecodedMB, shouldUseRecord, probeMp4Channels, listBoxes, parseSidx, toMono, DECODE_RATE, PCM_BYTES_PER_SEC_MONO, PCM_BYTES_PER_SEC_STEREO, RECORD_THRESHOLD_MB, SETTINGS, wbiCache };')();
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -109,6 +111,65 @@ test('parseVtt 标准（含标签）', () => {
   assert.strictEqual(r.length, 2);
   assert.strictEqual(r[0].content, '你好 世界');
   assert.strictEqual(r[1].from, 3600);
+});
+// —— 下面 4 条是 v9.0.1 线上事故回归：结束时间恒为 0，而旧测试只断言 from/content，根本抓不到 ——
+test('【事故回归】parseVtt 结束时间不能为 0（箭头右侧要先 trim）', () => {
+  const r = scope.parseVtt('WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n第一句');
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].from, 1);
+  assert.strictEqual(r[0].to, 4, '结束时间应解析为 4，实际 ' + r[0].to + '（旧版恒为 0，导出的 SRT 全部时长为 0）');
+});
+test('【事故回归】parseVtt 每条 to 必须 > from', () => {
+  const r = scope.parseVtt('WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nA\n\n00:00:05.000 --> 00:00:09.250\nB');
+  assert.strictEqual(r.length, 2);
+  r.forEach((x, i) => assert.ok(x.to > x.from, '第 ' + (i + 1) + ' 条 to(' + x.to + ') 应大于 from(' + x.from + ')'));
+  assert.strictEqual(r[1].to, 9.25);
+});
+test('【事故回归】parseVtt 带 cue 设置也能取到结束时间', () => {
+  const r = scope.parseVtt('WEBVTT\n\n00:00:01.000 --> 00:00:04.000 align:start position:10%\n带设置的一句');
+  assert.strictEqual(r[0].to, 4, '带 cue 设置时结束时间应为 4，实际 ' + r[0].to);
+});
+test('parseVtt 解码 HTML 实体（与 TTML 行为对齐）', () => {
+  const r = scope.parseVtt('WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nTom &amp; Jerry &lt;3 &nbsp;ok');
+  assert.strictEqual(r[0].content, 'Tom & Jerry <3  ok', '实体未解码：' + r[0].content);
+  assert.ok(r[0].content.indexOf('&amp;') < 0, '不应残留 &amp;');
+});
+test('parseVtt 跳过 NOTE / STYLE 块（块内 --> 不是字幕）', () => {
+  const r = scope.parseVtt('WEBVTT\n\nNOTE --> 这不是字幕\n备注正文\n\n00:00:01.000 --> 00:00:04.000\n真正的字幕');
+  assert.strictEqual(r.length, 1, 'NOTE 块应被跳过，实际 ' + r.length + ' 条');
+  assert.strictEqual(r[0].content, '真正的字幕');
+});
+test('parseSrt 纯数字正文不能丢（年份/编号是常见字幕内容）', () => {
+  const r = scope.parseSrt('1\n00:00:01,000 --> 00:00:02,000\n2024\n\n2\n00:00:02,000 --> 00:00:03,000\n42 度');
+  assert.strictEqual(r.length, 2, '应有两条，实际 ' + r.length);
+  assert.strictEqual(r[0].content, '2024', '纯数字正文被当成序号行吞掉了：' + JSON.stringify(r));
+});
+test('parseSrt 缺空行分隔也能按时间戳切条', () => {
+  const r = scope.parseSrt('1\n00:00:01,000 --> 00:00:02,000\n第一行\n2\n00:00:02,000 --> 00:00:03,000\n第二行');
+  assert.strictEqual(r.length, 2, '缺空行时应仍切成两条，实际 ' + r.length);
+  assert.strictEqual(r[0].content, '第一行');
+  assert.strictEqual(r[1].content, '第二行');
+});
+test('ttmlTime 支持 MM:SS 形态（旧版把 1:02 读成 1 秒）', () => {
+  assert.strictEqual(scope.ttmlTime('1:02'), 62, 'MM:SS 应得 62 秒');
+  assert.strictEqual(scope.ttmlTime('00:01:02.500'), 62.5);
+});
+test('unescapeEntities &amp; 最后解（不产生二次解码）', () => {
+  assert.strictEqual(scope.unescapeEntities('&amp;lt;'), '&lt;', '&amp; 必须最后解，否则会二次解码出伪造标签');
+  assert.strictEqual(scope.unescapeEntities('&#39;&quot;&#65;'), '\'"A');
+});
+test('escHtml 挡住属性注入（轨道名来自站点接口，不是写死的字面量）', () => {
+  assert.strictEqual(scope.escHtml('a" onmouseover="alert(1)'), 'a&quot; onmouseover=&quot;alert(1)');
+  assert.strictEqual(scope.escHtml('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;');
+});
+test('【源码断言】字幕轨道下拉用 escHtml 包裹 lan / lan_doc', () => {
+  const srcTxt = fs.readFileSync(path.join(__dirname, '..', 'bili-subtitle.user.js'), 'utf8');
+  const opt = srcTxt.match(/sel\.innerHTML = state\.subs\.map[\s\S]*?join\(''\);/);
+  assert.ok(opt, '未找到下拉渲染代码');
+  const tpl = opt[0];
+  assert.ok(/value="'\s*\+\s*escHtml\(s\.lan\)/.test(tpl), 'option 的 value 属性必须过 escHtml');
+  assert.ok(/>\s*'\s*\+\s*escHtml\(s\.lan_doc \|\| s\.lan\)/.test(tpl), 'option 的显示名必须过 escHtml');
+  assert.ok(!/value="'\s*\+\s*s\.lan\b/.test(tpl), 'value 属性里出现了未转义的 s.lan（属性注入口子）');
 });
 test('vttTime 逗号毫秒（SRT 型 track）', () => {
   assert.strictEqual(scope.vttTime('00:00:01,500'), 1.5);

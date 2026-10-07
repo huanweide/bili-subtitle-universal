@@ -3,9 +3,9 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.0.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.0.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-75%2F75-3a8ee6)](tests/run-tests.js)
+[![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
 
 ---
@@ -32,7 +32,7 @@
 | **转写时一声不响** | 分段解码根本不播放；兜底路线全程静音（增益 0）。最小化页面照样跑 |
 | **进度看得见** | 五阶段进度条 + 实时字幕流（边转边长）+ 预计剩余时间 + 收起后的小胶囊 + 完成系统通知 |
 | **纯前端，密钥不出浏览器** | 没有服务器，你的 API Key 只存在 Tampermonkey 本地沙箱，不上传任何第三方 |
-| **有测试兜底** | 54 项 Node 单元测试 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
+| **有测试兜底** | 86 项 Node 单元测试 + 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍（新增用例还过了 5/5 变异测试，不是摆着看的空测试） |
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**。
 
@@ -220,6 +220,7 @@ YouTube 音频是带签名分片的流媒体，需要解流签名才能取到。
 
 ## 路线图
 
+- ✅ **v9.0.1 · 字幕正确性（已完成）**：修掉 VTT 结束时间恒为 0（此前所有 YouTube 字幕导出的 SRT 结束时间都是 0）、SRT 纯数字正文被吞、VTT 不解码 HTML 实体；轨道名统一转义；新增文档一致性门禁。
 - ✅ **v9.0 · 分段解码（已完成）**：按分片目录逐片下载、逐片独立解码，内存恒定，完全不播放，时间戳用目录给的精确起点。
 - **v9.1（下一步）**：分片断点续传（网络断了接着取，已转的部分不重来）、并发转写加速、每片进度更细。
 - **v9.2（规划）**：更多站点适配、字幕格式扩展（ASS / LRC）、暗色模式。
@@ -231,7 +232,8 @@ YouTube 音频是带签名分片的流媒体，需要解流签名才能取到。
 ## 开发与测试
 
 ```bash
-node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化（69 项）
+node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化（86 项）
+node tests/check-docs.js     # 文档一致性门禁：README 的版本号/测试数必须和源码对得上（防手工改漏）
 node tests/serve.js          # 本地静态服务，端口 8765
 ```
 

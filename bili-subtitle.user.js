@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.6.0
+// @version      9.7.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,9 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.7.0 面板主题与可见性：新增深色模式（跟随系统 / 深浅手动切），右下角 FAB 从纯图标圆点
+//       改成带「字幕」二字的胶囊（纯图标等于没人看得见），补齐 hover/active/焦点描边/细滚动条/
+//       入场动画与窄屏响应式。
 // 9.6.0 锚点不再误伤 + 导出只复制：URL 只变 ?t= 锚点/追踪参数时字幕不再被清空（此前点个
 //       章节跳转就得重新取一遍）；AI 文本 / 锚点稿不再「复制 + 下载」双触发，默认只复制；
 //       换分 P 可自动重新获取字幕。
@@ -1116,7 +1119,9 @@
     // v9.6 换分 P（?p=2）后自动重新获取字幕：同视频换 P 只多一次字幕接口请求，不烧 ASR 额度，默认开
     autoFetchOnPageSwitch: GM_getValue('bsr_auto_fetch_page', true),
     // v9.6 导出形态按钮（AI 文本 / 锚点稿）的动作：copy=只复制（默认）/ download=只下载 / both=复制+下载
-    exportMode: GM_getValue('bsr_export_mode', 'copy')
+    exportMode: GM_getValue('bsr_export_mode', 'copy'),
+    // v9.6 面板主题：auto=跟随系统（默认）/ light=始终浅色 / dark=始终深色
+    theme: GM_getValue('bsr_theme', 'auto')
   };
   function saveSettings() {
     try {
@@ -1140,6 +1145,7 @@
       GM_setValue('bsr_custom_hotwords', SETTINGS.customHotwords);
       GM_setValue('bsr_auto_fetch_page', SETTINGS.autoFetchOnPageSwitch);
       GM_setValue('bsr_export_mode', SETTINGS.exportMode);
+      GM_setValue('bsr_theme', SETTINGS.theme);
     } catch (e) { log('设置保存失败', e); }
   }
 
@@ -3131,6 +3137,32 @@
 
   // ===================== UI =====================
   var root = null;
+
+  /**
+   * v9.6 主题：把「深浅」落到 #bsr-root 的 data-theme 上，真正的配色在样式块的
+   * 暗色覆盖层里（见 buildUI 的 style）。auto 跟随系统，且系统切换时实时跟随——
+   * 用户在 B 站把页面切成深色，面板自己变深，不用进设置改。
+   */
+  function isDarkPreferred() {
+    if (SETTINGS.theme === 'dark') return true;
+    if (SETTINGS.theme === 'light') return false;
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    } catch (e) { return false; }
+  }
+  function applyTheme() {
+    if (!root) return;
+    var dark = isDarkPreferred();
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var btn = root.querySelector('#bsrThemeBtn');
+    if (btn) {
+      btn.textContent = dark ? '☀' : '🌙';
+      btn.title = dark ? '当前深色，点一下切浅色' : '当前浅色，点一下切深色';
+    }
+  }
+  // 头部按钮点一下 = 在深浅之间直接切（切的是显式值，不是改 auto）
+  function toggleTheme() { SETTINGS.theme = isDarkPreferred() ? 'light' : 'dark'; saveSettings(); applyTheme(); }
+
   function buildUI() {
     if (root) return;
     root = document.createElement('div');
@@ -3138,9 +3170,13 @@
     root.innerHTML =
       '<style>' +
       '#bsr-root{position:fixed;right:16px;bottom:120px;z-index:999999;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}' +
-      '#bsr-fab{width:52px;height:52px;border:none;border-radius:50%;background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 16px rgba(251,114,153,.5);transition:.15s}' +
-      '#bsr-fab:hover{transform:scale(1.08)}' +
-      '#bsr-panel{display:none;position:fixed;right:16px;bottom:180px;width:380px;max-height:80vh;background:#fff;color:#222;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.25);overflow:hidden;flex-direction:column}' +
+      // v9.6：FAB 从「52px 纯图标圆点」改成「🎬 字幕」胶囊。
+      // 纯图标按钮在首屏扫视里等于不存在——新用户不知道右下角那个圆点是什么，
+      // 点了才知道。带上文字，一眼能认。
+      '#bsr-fab{height:46px;padding:0 18px;border:none;border-radius:23px;background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;font-size:19px;cursor:pointer;box-shadow:0 4px 16px rgba(251,114,153,.5);transition:.15s;display:inline-flex;align-items:center;gap:7px;font-family:inherit}' +
+      '#bsr-fab .lb{font-size:13px;font-weight:700;letter-spacing:.5px}' +
+      '#bsr-fab:hover{transform:scale(1.05)}' +
+      '#bsr-panel{display:none;position:fixed;right:16px;bottom:180px;width:380px;max-width:calc(100vw - 32px);max-height:80vh;background:#fff;color:#222;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.25);overflow:hidden;flex-direction:column}' +
       '#bsr-panel.show{display:flex}' +
       '.bsr-h{display:flex;align-items:center;gap:8px;padding:12px 14px;background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;font-weight:700;font-size:14px}' +
       '.bsr-h .x{margin-left:auto;cursor:pointer;font-weight:400;opacity:.9}' +
@@ -3234,10 +3270,81 @@
       '.bsr-save{width:100%;margin-top:10px;background:#7C5CBF}' +
       '#bsr-toast{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#4ecca3;color:#111;padding:12px 22px;border-radius:10px;font-size:14px;font-weight:700;z-index:1000000;opacity:0;transition:.25s;pointer-events:none;max-width:80vw;text-align:center}' +
       '#bsr-toast.show{opacity:1}' +
+      // ================= v9.6 主题系统 =================
+      // 为什么是「覆盖层」而不是改写上面所有硬编码色：亮色样式是逐年调出来的，
+      // 全量重写风险大且无法一眼比对；覆盖层只在 data-theme=dark 下生效，
+      // 亮色模式字节不变，零回归风险。新增元素记得同步到这里。
+      '#bsr-root{--bsr-bg:#ffffff;--bsr-bg2:#ffffff;--bsr-fg:#222222;--bsr-muted:#888888;--bsr-line:#eeeeee;--bsr-soft:#fafafa;--bsr-input:#ffffff;--bsr-shadow:0 8px 40px rgba(0,0,0,.18)}' +
+      '#bsr-root[data-theme="dark"]{--bsr-bg:#1b1b1f;--bsr-bg2:#232329;--bsr-fg:#ececf1;--bsr-muted:#9a9aa3;--bsr-line:#34343d;--bsr-soft:#26262d;--bsr-input:#141418;--bsr-shadow:0 10px 44px rgba(0,0,0,.6)}' +
+      '#bsr-root[data-theme="dark"] #bsr-panel{background:var(--bsr-bg);color:var(--bsr-fg);box-shadow:var(--bsr-shadow);border:1px solid var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-h{background:linear-gradient(135deg,#b83a63,#FB7299)}' +
+      '#bsr-root[data-theme="dark"] .bsr-title{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-sel{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-ta{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-st{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-prog{color:#7ab7f0}' +
+      '#bsr-root[data-theme="dark"] .bsr-bar{background:var(--bsr-soft)}' +
+      '#bsr-root[data-theme="dark"] .bsr-barinfo{color:#7ab7f0}' +
+      '#bsr-root[data-theme="dark"] .bsr-chunks{background:var(--bsr-soft);color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-step{color:#6a6a72;border-top-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-meta{color:#b9b9c0}' +
+      '#bsr-root[data-theme="dark"] .bsr-meta b{color:#FF8FB1}' +
+      '#bsr-root[data-theme="dark"] .bsr-live{background:var(--bsr-soft);color:#cfcfd6;border-left-color:#4ecca3}' +
+      '#bsr-root[data-theme="dark"] .bsr-live .t{color:#7ab7f0}' +
+      '#bsr-root[data-theme="dark"] .bsr-setbox{border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-setbox label{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-setbox .chk{color:#c5c5cc}' +
+      '#bsr-root[data-theme="dark"] .bsr-setbox input[type=password],#bsr-root[data-theme="dark"] .bsr-setbox input[type=text],#bsr-root[data-theme="dark"] .bsr-setbox select{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv{background:linear-gradient(135deg,#2a2418,#2a1c26);border-color:#7a5a2a}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv-t{color:#f0c078}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv-t b{color:#ffb35c}' +
+      '#bsr-root[data-theme="dark"] .bsr-model-note{color:#d0a068}' +
+      '#bsr-root[data-theme="dark"] .bsr-model-note a{color:#7ab7f0}' +
+      '#bsr-root[data-theme="dark"] .bsr-credit{background:var(--bsr-bg);color:#8a8a92;border-top-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-credit a{color:#b9a3ff}' +
+      '#bsr-root[data-theme="dark"] .bsr-tabs{background:var(--bsr-bg);border-bottom-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-tab{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-input{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-res{border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-res:hover{border-color:#FB7299;background:#2a1f27}' +
+      '#bsr-root[data-theme="dark"] .bsr-res-t{color:var(--bsr-fg)}' +
+      '#bsr-root[data-theme="dark"] .bsr-res-m{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-res-r{background:var(--bsr-soft);color:#b0b0b8}' +
+      '#bsr-root[data-theme="dark"] .bsr-empty{color:#8a8a92}' +
+      '#bsr-root[data-theme="dark"] .bsr-wbox{border-color:#4a4a55}' +
+      '#bsr-root[data-theme="dark"] .bsr-wbox textarea{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-wtip{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-wrow label{color:#c5c5cc}' +
+      '#bsr-root[data-theme="dark"] .bsr-wval{color:#FF8FB1}' +
+      '#bsr-root[data-theme="dark"] .bsr-wpresets button{background:var(--bsr-soft);color:#c5c5cc;border-color:#3d3d47}' +
+      '#bsr-root[data-theme="dark"] .bsr-wpresets button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
+      '#bsr-root[data-theme="dark"] .bsr-wpreset-tip{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-keywrap .eye{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-sub.yes{background:#14352a;color:#5fd6a8}' +
+      '#bsr-root[data-theme="dark"] .bsr-sub.no{background:#3a2020;color:#ff9a9a}' +
+      '#bsr-root[data-theme="dark"] .bsr-tier.C{background:#6a6a72}' +
+      '#bsr-root[data-theme="dark"] #bsr-toast{background:#2a2a31;color:#ececf1;box-shadow:0 8px 30px rgba(0,0,0,.5)}' +
+      // ================= v9.6 交互与可读性增强（明暗通用） =================
+      '.bsr-btn{transition:filter .15s,transform .1s}' +
+      '.bsr-btn:hover{filter:brightness(1.09)}' +
+      '.bsr-btn:active{transform:translateY(1px)}' +
+      '.bsr-btn:disabled{opacity:.55;cursor:default}' +
+      '#bsr-root button:focus-visible,#bsr-root select:focus-visible,#bsr-root input:focus-visible,#bsr-root textarea:focus-visible{outline:2px solid #7C5CBF;outline-offset:1px}' +
+      '.bsr-h .th{cursor:pointer;opacity:.9;font-size:13px;user-select:none}' +
+      '.bsr-h .th:hover{opacity:1;transform:scale(1.12)}' +
+      '.bsr-b::-webkit-scrollbar{width:8px}' +
+      '.bsr-b::-webkit-scrollbar-thumb{background:rgba(128,128,140,.35);border-radius:4px}' +
+      '.bsr-b::-webkit-scrollbar-thumb:hover{background:rgba(128,128,140,.55)}' +
+      '.bsr-ta::-webkit-scrollbar,.bsr-live::-webkit-scrollbar,.bsr-chunks::-webkit-scrollbar{width:8px}' +
+      '.bsr-ta::-webkit-scrollbar-thumb,.bsr-live::-webkit-scrollbar-thumb,.bsr-chunks::-webkit-scrollbar-thumb{background:rgba(128,128,140,.35);border-radius:4px}' +
+      '.bsr-get{letter-spacing:.3px}' +
+      '.bsr-res{box-shadow:0 1px 3px rgba(0,0,0,.04)}' +
+      '#bsr-panel{animation:bsrIn .18s ease-out}' +
+      '@keyframes bsrIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}' +
       '</style>' +
-      '<button id="bsr-fab" title="字幕提取">🎬</button>' +
+      '<button id="bsr-fab" title="字幕提取 · 点开面板（有官方字幕秒取，没字幕可 AI 转写）" aria-label="字幕提取">🎬<span class="lb">字幕</span></button>' +
       '<div id="bsr-panel">' +
-      '  <div class="bsr-h">📝 字幕提取 <span class="x" id="bsrClose">✕</span></div>' +
+      '  <div class="bsr-h">📝 字幕提取 <span class="th" id="bsrThemeBtn" style="margin-left:auto" title="切换深色 / 浅色">🌙</span> <span class="x" id="bsrClose" style="margin-left:8px" title="收起面板">✕</span></div>' +
       '  <div class="bsr-tabs">' +
       '    <div class="bsr-tab on" data-tab="sub">📝 字幕提取</div>' +
       '    <div class="bsr-tab" data-tab="search">🔍 搜索筛选</div>' +
@@ -3414,6 +3521,12 @@
       '        <option value="both">复制 + 下载</option>' +
       '      </select>' +
       '      <div class="bsr-model-note">「📋 复制 / ⬇ TXT / ⬇ SRT」三个主按钮不受此项影响：复制始终只复制，下载始终只下载。</div>' +
+      '      <label>面板主题（深色模式）</label>' +
+      '      <select id="bsrTheme">' +
+      '        <option value="auto">跟随系统（推荐）</option>' +
+      '        <option value="light">始终浅色</option>' +
+      '        <option value="dark">始终深色</option>' +
+      '      </select>' +
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
@@ -3431,6 +3544,17 @@
       render();
     };
     root.querySelector('#bsrClose').onclick = function () { root.querySelector('#bsr-panel').classList.remove('show'); render(); };
+    applyTheme();   // v9.6：建好 DOM 立刻落一次主题，避免第一帧闪白
+    // 跟随系统：用户在系统/浏览器里切深色，面板实时跟上
+    try {
+      if (window.matchMedia) {
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var onScheme = function () { if ((SETTINGS.theme || 'auto') === 'auto') applyTheme(); };
+        if (mq.addEventListener) mq.addEventListener('change', onScheme);
+        else if (mq.addListener) mq.addListener(onScheme);   // 老 Safari
+      }
+    } catch (e) {}
+    root.querySelector('#bsrThemeBtn').onclick = function () { toggleTheme(); };
     root.querySelector('#bsrGet').onclick = function () { getSubtitles(); };
     root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(state.body) : getVideoInfoText()); };
     root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(state.body)); };
@@ -3482,7 +3606,9 @@
       SETTINGS.ytKey = root.querySelector('#bsrYtKey').value.trim();
       SETTINGS.autoFetchOnPageSwitch = root.querySelector('#bsrAutoFetchPage').checked;
       SETTINGS.exportMode = root.querySelector('#bsrExportMode').value;
+      SETTINGS.theme = root.querySelector('#bsrTheme').value;
       saveSettings();
+      applyTheme();
       toast('设置已保存');
       render();
     };
@@ -3657,6 +3783,7 @@
     root.querySelector('#bsrYtKey').value = SETTINGS.ytKey;
     root.querySelector('#bsrAutoFetchPage').checked = SETTINGS.autoFetchOnPageSwitch;
     root.querySelector('#bsrExportMode').value = SETTINGS.exportMode || 'copy';
+    root.querySelector('#bsrTheme').value = SETTINGS.theme || 'auto';
     root.querySelector('#bsrSearchPlatform').value = SETTINGS.searchPlatform;
     root.querySelector('#bsrSearchOrder').value = search.order;
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;

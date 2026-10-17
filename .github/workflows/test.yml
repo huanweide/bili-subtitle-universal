@@ -29,5 +29,7 @@ jobs:
         run: node tests/test-wiring.js
       - name: 路由身份与导出动作测试（25 条：锚点不误伤 / 换 P 必换 / 反向断言防回潮）
         run: node tests/test-route.js
+      - name: 主题与可见性测试（21 条：暗色覆盖完整性 / FAB 可见文字 / 无障碍 / 交互反馈）
+        run: node tests/test-ui.js
       - name: 文档一致性门禁（版本号 / 测试数不得漂移）
         run: node tests/check-docs.js

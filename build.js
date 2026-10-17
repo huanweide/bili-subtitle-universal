@@ -9,7 +9,8 @@ const modules = [
   { file: 'candidate-scorer.js', init: 'var CandidateScorer = createCandidateScorerModule();' },
   { file: 'search-filter.js', init: 'var SearchFilter = createSearchFilterModule();' },
   { file: 'transcript-quality.js', init: 'var TranscriptQuality = createTranscriptQualityModule();' },
-  { file: 'seg-resume.js', init: 'var SegResume = createSegResumeModule();' }
+  { file: 'seg-resume.js', init: 'var SegResume = createSegResumeModule();' },
+  { file: 'route-identity.js', init: 'var RouteIdentity = createRouteIdentityModule();' }
 ];
 
 function browserSource(file) {

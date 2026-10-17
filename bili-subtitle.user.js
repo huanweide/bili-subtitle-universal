@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.5.0
+// @version      9.6.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,9 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.6.0 锚点不再误伤 + 导出只复制：URL 只变 ?t= 锚点/追踪参数时字幕不再被清空（此前点个
+//       章节跳转就得重新取一遍）；AI 文本 / 锚点稿不再「复制 + 下载」双触发，默认只复制；
+//       换分 P 可自动重新获取字幕。
 // 9.5.0 权重预设一键切换：滑块面板顶部加「保守（省 ASR）/ 均衡 / 激进（追干货）」三档
 //       胶囊按钮，一点即切、即时重排不需重新搜索；当前权重恰好等于某档就高亮该档，
 //       拖动过滑块脱离预设则如实标「自定义」（不谎称仍在均衡档）。
@@ -907,6 +910,164 @@
     };
   }
   var SegResume = createSegResumeModule();
+  /**
+   * 路由身份识别（v9.6）。
+   *
+   * 背景：脚本用「location.href 变了没」判断用户是不是换了一条视频。B 站的评论区时间戳、
+   * 章节锚点、分享链接都会往 URL 上挂 ?t=123 / &spm_id_from=xxx / &vd_source=xxx 这类参数，
+   * 于是「点了个锚点跳到第 2 分钟」被误判成「换了一条视频」——取好的字幕被整条清空，
+   * 用户还得再点一次「⚡ 获取字幕」。这是纯误伤：视频根本没变。
+   *
+   * 正解：比较「视频身份」而不是比较整条 URL。身份 = 站点 + 视频号 + 分 P 号，
+   * 锚点与追踪参数一律不参与比较。
+   *
+   * 设计约束：
+   * 1. 纯函数，不碰 DOM、不碰 location——Node 里能完整测试。
+   * 2. 解析失败绝不抛异常，退化成去锚点后的原始串（宁可多 reset 一次，不能崩）。
+   * 3. 追踪参数表是「宁可多列」的：漏列一个 = 一次误伤，多列一个 = 只影响通用站点的
+   *    身份粒度（通用站没有视频号，只能靠 URL 本身）。
+   * 4. 分 P 号必须参与身份：B 站 ?p=2 是另一条 cid，字幕必须重取。
+   */
+  function createRouteIdentityModule() {
+    // 锚点与追踪参数：变了不算换视频。
+    // t = B 站/YouTube 的跳转秒数（章节锚点、评论区时间戳链接就是它）；
+    // 其余是各站的增长/分享归因参数，每点一次链接都可能变。
+    var TRACKING_PARAMS = [
+      't', 'start', 'end', 'time_continue', 'timestamp', 'ts', '_',
+      'spm_id_from', 'from_spmid', 'spm', 'vd_source', 'from', 'seid', 'tracelog',
+      'share_source', 'share_medium', 'share_plat', 'share_session_id', 'share_tag', 'share_times',
+      'unique_k', 'buvid', 'buvid3', 'buvid4', 'up_id', 'visit_id', 'session_id',
+      'callback', 'plat_id', 'goto', 'report_source', 'o', 'wxf', 'wm', 'ci', 'dm', 'at',
+      'abtest', 'vt', 'live_from', 'referfrom', 'trackid', 'msource', 'spmid', 'utm_source',
+      'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid'
+    ];
+    var TRACK = {};
+    for (var i = 0; i < TRACKING_PARAMS.length; i++) TRACK[TRACKING_PARAMS[i]] = true;
+  
+    // 这些参数看着像参数，其实是「内容的一部分」，不能丢
+    var KEEP_PARAMS = { p: true, page: true, v: true, list: true, index: true };
+  
+    function safeUrl(href) {
+      try { return new URL(String(href || '')); } catch (e) { return null; }
+    }
+  
+    function keptQuery(u) {
+      var out = [];
+      u.searchParams.forEach(function (v, k) {
+        var lk = String(k).toLowerCase();
+        if (KEEP_PARAMS[lk]) { out.push(lk + '=' + v); return; }
+        if (TRACK[lk]) return;
+        out.push(lk + '=' + v);
+      });
+      out.sort();
+      return out.join('&');
+    }
+  
+    function pageNumber(u) {
+      var p = parseInt(u.searchParams.get('p'), 10);
+      if (!isFinite(p) || p < 1) p = 1;
+      return p;
+    }
+  
+    // B 站：/video/BVxxx?p=N 是最常见形态；番剧走 ep/ss；合集/稍后再看走 list。
+    function biliIdentity(u) {
+      var host = String(u.hostname || '').replace(/^www\./i, '').replace(/^m\./i, '');
+      if (!/(^|\.)bilibili\.com$/i.test(host)) return null;
+      var path = u.pathname || '';
+      var mv = path.match(/\/video\/(BV[0-9A-Za-z]+)/i);
+      if (mv) return { id: 'bili:' + mv[1] + ':p' + pageNumber(u), family: 'bili:' + mv[1], page: pageNumber(u), site: 'bilibili' };
+      var ma = path.match(/\/video\/(av[0-9]+)/i);
+      if (ma) return { id: 'bili:' + ma[1] + ':p' + pageNumber(u), family: 'bili:' + ma[1], page: pageNumber(u), site: 'bilibili' };
+      var me = path.match(/\/bangumi\/play\/(ep[0-9]+)/i);
+      if (me) return { id: 'bili:' + me[1], family: 'bili:' + me[1], page: 1, site: 'bilibili' };
+      var ms = path.match(/\/bangumi\/play\/(ss[0-9]+)/i);
+      if (ms) return { id: 'bili:' + ms[1], family: 'bili:' + ms[1], page: 1, site: 'bilibili' };
+      var ml = path.match(/\/(?:list|medialist)\/(?:watchlater|fav|series|[A-Za-z0-9_-]+)/i);
+      if (ml) return { id: 'bili:list:' + ml[0], family: 'bili:list:' + ml[0], page: 1, site: 'bilibili' };
+      return null;
+    }
+  
+    function ytIdentity(u) {
+      var host = String(u.hostname || '').replace(/^www\./i, '').replace(/^m\./i, '');
+      var isYt = /(^|\.)youtube\.com$/i.test(host) || host === 'youtu.be' || /(^|\.)youtube-nocookie\.com$/i.test(host);
+      if (!isYt) return null;
+      if (host === 'youtu.be') {
+        var s = String(u.pathname || '').replace(/^\//, '').split('/')[0];
+        if (/^[A-Za-z0-9_-]{11}$/.test(s)) return { id: 'yt:' + s, family: 'yt:' + s, page: 1, site: 'youtube' };
+        return null;
+      }
+      var v = u.searchParams.get('v');
+      if (v && /^[A-Za-z0-9_-]{11}$/.test(v)) return { id: 'yt:' + v, family: 'yt:' + v, page: 1, site: 'youtube' };
+      var m = String(u.pathname || '').match(/\/(?:watch|embed|shorts|live|v)\/([A-Za-z0-9_-]{11})/);
+      if (m) return { id: 'yt:' + m[1], family: 'yt:' + m[1], page: 1, site: 'youtube' };
+      return null;
+    }
+  
+    // 解析不了 URL（相对路径 / 怪协议）时的退化：至少把锚点和 hash 剥掉
+    function fallbackIdentity(href) {
+      var s = String(href || '').split('#')[0];
+      s = s.replace(/([?&])t=\d+(?=&|$)/g, '$1').replace(/[?&]$/, '');
+      return { id: 'raw:' + s, family: 'raw:' + s, page: 1, site: 'generic' };
+    }
+  
+    /**
+     * 解析一条 URL 的视频身份。
+     * 返回 { id, family, page, site }：
+     *  - id：完整身份（含分 P），变了这个 = 必须重取字幕
+     *  - family：去掉分 P 的身份，用来区分「换 P」和「换视频」
+     *  - page：分 P 号（B 站有效，其余恒为 1）
+     *  - site：站点归类
+     */
+    function parse(href) {
+      var u = safeUrl(href);
+      if (!u) return fallbackIdentity(href);
+      var r = biliIdentity(u) || ytIdentity(u);
+      if (r) return r;
+      var q = keptQuery(u);
+      var base = String(u.origin || '') + String(u.pathname || '') + (q ? '?' + q : '');
+      return { id: 'page:' + base, family: 'page:' + base, page: 1, site: 'generic' };
+    }
+  
+    function identity(href) { return parse(href).id; }
+    function family(href) { return parse(href).family; }
+  
+    // 身份相同 = 同一条视频（锚点/追踪参数变化不算）
+    function isSameVideo(a, b) {
+      if (!a || !b) return false;
+      return identity(a) === identity(b);
+    }
+  
+    // 同一条视频换了分 P：字幕必须重取，但不用当成「换了一条视频」
+    function isSameVideoFamily(a, b) {
+      if (!a || !b) return false;
+      var fa = parse(a), fb = parse(b);
+      return !!fa.family && fa.family === fb.family && fa.id !== fb.id;
+    }
+  
+    function pageOf(href) { return parse(href).page; }
+    function siteOf(href) { return parse(href).site; }
+  
+    // 把 URL 洗成「去掉锚点与追踪参数」的干净形态：用于显示与日志，不用于比较
+    function cleanUrl(href) {
+      var u = safeUrl(href);
+      if (!u) return fallbackIdentity(href).id.replace(/^raw:/, '');
+      var q = keptQuery(u);
+      return String(u.origin || '') + String(u.pathname || '') + (q ? '?' + q : '');
+    }
+  
+    return {
+      TRACKING_PARAMS: TRACKING_PARAMS,
+      parse: parse,
+      identity: identity,
+      family: family,
+      isSameVideo: isSameVideo,
+      isSameVideoFamily: isSameVideoFamily,
+      pageOf: pageOf,
+      siteOf: siteOf,
+      cleanUrl: cleanUrl
+    };
+  }
+  var RouteIdentity = createRouteIdentityModule();
   // </build:modules>
 
   // ===================== 状态 =====================
@@ -951,7 +1112,11 @@
     ytKey: GM_getValue('bsr_yt_key', ''),
     scoreWeights: GM_getValue('bsr_score_weights', ''),
     searchPlatform: GM_getValue('bsr_search_platform', 'bilibili'),
-    customHotwords: GM_getValue('bsr_custom_hotwords', '')
+    customHotwords: GM_getValue('bsr_custom_hotwords', ''),
+    // v9.6 换分 P（?p=2）后自动重新获取字幕：同视频换 P 只多一次字幕接口请求，不烧 ASR 额度，默认开
+    autoFetchOnPageSwitch: GM_getValue('bsr_auto_fetch_page', true),
+    // v9.6 导出形态按钮（AI 文本 / 锚点稿）的动作：copy=只复制（默认）/ download=只下载 / both=复制+下载
+    exportMode: GM_getValue('bsr_export_mode', 'copy')
   };
   function saveSettings() {
     try {
@@ -973,6 +1138,8 @@
       GM_setValue('bsr_score_weights', SETTINGS.scoreWeights);
       GM_setValue('bsr_search_platform', SETTINGS.searchPlatform);
       GM_setValue('bsr_custom_hotwords', SETTINGS.customHotwords);
+      GM_setValue('bsr_auto_fetch_page', SETTINGS.autoFetchOnPageSwitch);
+      GM_setValue('bsr_export_mode', SETTINGS.exportMode);
     } catch (e) { log('设置保存失败', e); }
   }
 
@@ -2766,17 +2933,26 @@
   // ===================== v9.2 双形态导出 =====================
   // 「AI 纯文本」：剥掉时间戳——给 AI 总结用（时间戳对模型是噪音，且会漂移 ±20 秒）；
   // 「章节锚点稿」：保留章节级时间锚点——给人阅读/跳转用（精确到句的时间轴没人看）。
+  /**
+   * v9.6 导出动作统一出口。
+   *
+   * 旧实现 copyText() 和 download() 连着调：用户只想把文字复制走，却被硬塞一个 .txt 下载，
+   * 下载栏堆满临时文件还得自己清。现在按设置的 exportMode 分派，默认只复制。
+   */
+  function emitExport(baseName, text) {
+    if (!text) { toast('没有可导出的内容'); return; }
+    var mode = SETTINGS.exportMode || 'copy';
+    if (mode === 'copy' || mode === 'both') copyText(text);
+    if (mode === 'download' || mode === 'both') download(safeName(baseName) + '.txt', '\uFEFF' + text);
+    if (mode === 'download') toast('已下载 ' + safeName(baseName) + '.txt');
+  }
   function exportAiText() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    var text = TranscriptQuality.bodyToAiText(state.body);
-    copyText(text);
-    download(safeName(state.title) + '_AI纯文本.txt', '\uFEFF' + text);
+    emitExport(state.title + '_AI纯文本', TranscriptQuality.bodyToAiText(state.body));
   }
   function exportAnchored() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    var text = TranscriptQuality.bodyToAnchoredText(state.body, { gapSec: 300 });
-    copyText(text);
-    download(safeName(state.title) + '_章节锚点稿.txt', '\uFEFF' + text);
+    emitExport(state.title + '_章节锚点稿', TranscriptQuality.bodyToAnchoredText(state.body, { gapSec: 300 }));
   }
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
@@ -3230,6 +3406,14 @@
       '        <input type="password" id="bsrYtKey" placeholder="AIza..." autocomplete="off" />' +
       '        <span class="eye" id="bsrYtEye">👁</span>' +
       '      </div>' +
+      '      <label class="chk"><input type="checkbox" id="bsrAutoFetchPage" /> 换分 P（?p=2）后自动重新获取字幕（只多一次字幕请求，不烧额度）</label>' +
+      '      <label>导出按钮（AI 文本 / 锚点稿）的动作</label>' +
+      '      <select id="bsrExportMode">' +
+      '        <option value="copy">只复制到剪贴板（推荐·不落文件）</option>' +
+      '        <option value="download">只下载 .txt 文件</option>' +
+      '        <option value="both">复制 + 下载</option>' +
+      '      </select>' +
+      '      <div class="bsr-model-note">「📋 复制 / ⬇ TXT / ⬇ SRT」三个主按钮不受此项影响：复制始终只复制，下载始终只下载。</div>' +
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
@@ -3296,6 +3480,8 @@
       SETTINGS.llmCorrect = root.querySelector('#bsrLlmCorrect').checked;
       SETTINGS.customHotwords = root.querySelector('#bsrCustomHotwords').value.trim();
       SETTINGS.ytKey = root.querySelector('#bsrYtKey').value.trim();
+      SETTINGS.autoFetchOnPageSwitch = root.querySelector('#bsrAutoFetchPage').checked;
+      SETTINGS.exportMode = root.querySelector('#bsrExportMode').value;
       saveSettings();
       toast('设置已保存');
       render();
@@ -3469,6 +3655,8 @@
     root.querySelector('#bsrLlmCorrect').checked = SETTINGS.llmCorrect;
     root.querySelector('#bsrCustomHotwords').value = SETTINGS.customHotwords;
     root.querySelector('#bsrYtKey').value = SETTINGS.ytKey;
+    root.querySelector('#bsrAutoFetchPage').checked = SETTINGS.autoFetchOnPageSwitch;
+    root.querySelector('#bsrExportMode').value = SETTINGS.exportMode || 'copy';
     root.querySelector('#bsrSearchPlatform').value = SETTINGS.searchPlatform;
     root.querySelector('#bsrSearchOrder').value = search.order;
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
@@ -3697,7 +3885,8 @@
     state.subs = []; state.body = null; state.lan = ''; state.err = ''; state.noSub = false; state.loading = false; state.asr = null; state.asrRan = false;
     state.bvid = ''; state.aid = ''; state.title = ''; state.up = ''; state.desc = ''; state.duration = 0;
     state.audioDurSec = 0; state.audioSizeMB = 0; state.audioCh = 0;   // 切视频必须清：否则下一条视频沿用上一条的时长，选路全错
-    state.page = 1; state.pageTitle = ''; state.totalPages = 1;
+    state.page = RouteIdentity.pageOf(location.href) || 1;   // v9.6：分 P 号直接从 URL 读，切 P 后导出文件名才不会一直写 P1
+    state.pageTitle = ''; state.totalPages = 1;
     var m = location.pathname.match(/BV\w+/);
     if (m) state.bvid = m[0];
     render();
@@ -3710,6 +3899,30 @@
     return !!(adapters.bilibili.match() || adapters.youtube.match() || adapters.html5.match());
   }
 
+  /**
+   * v9.6 路由变化处理：先判断「变了什么」，再决定动不动字幕。
+   *
+   * 旧实现拿整条 location.href 比对，于是「点评论区时间戳跳到第 2 分钟」（URL 多出 ?t=120）
+   * 被当成「换了一条视频」，取好的字幕被整条清空，用户还得再点一次「⚡ 获取字幕」——纯误伤。
+   *
+   * 三种情况分开处理：
+   * ① 只变锚点/追踪参数 → 视频没变，什么都不做，字幕原样保留。
+   * ② 换分 P（?p=2）    → cid 变了必须重置；开了「换 P 自动获取」就顺手重取一次。
+   * ③ 换了整条视频      → 重置，不自动取（避免一进页面就替用户烧额度）。
+   */
+  function handleRouteChange(prevHref, nextHref) {
+    if (RouteIdentity.isSameVideo(prevHref, nextHref)) {
+      log('URL 只变了锚点/追踪参数，视频未变，字幕保持不变');
+      return;
+    }
+    var switchingPage = RouteIdentity.isSameVideoFamily(prevHref, nextHref);
+    resetForNewVideo();
+    if (switchingPage && SETTINGS.autoFetchOnPageSwitch) {
+      log('检测到换 P（P' + RouteIdentity.pageOf(nextHref) + '），自动重新获取字幕');
+      setTimeout(function () { if (state.adapter && !state.loading) getSubtitles(); }, 400);
+    }
+  }
+
   function boot() {
     if (!isSupportedSite()) return;   // 纯文字页面不打扰
     buildUI();
@@ -3718,10 +3931,17 @@
     var last = location.href;
     // 轮询 URL 变化（SPA 切换）
     setInterval(function () {
-      if (location.href !== last) { last = location.href; setTimeout(resetForNewVideo, 800); }
+      if (location.href === last) return;
+      var prev = last;
+      last = location.href;
+      setTimeout(function () { handleRouteChange(prev, last); }, 800);
     }, 800);
     // YouTube SPA 导航事件
-    document.addEventListener('yt-navigate-finish', function () { setTimeout(resetForNewVideo, 500); });
+    document.addEventListener('yt-navigate-finish', function () {
+      var prev = last;
+      last = location.href;
+      setTimeout(function () { handleRouteChange(prev, last); }, 500);
+    });
     // 兜底：页面里 video 元素后加载（MutationObserver 监听 video 出现）
     if (!detectAdapter()) {
       var mo = new MutationObserver(function () {

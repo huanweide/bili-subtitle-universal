@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.7.0
+// @version      9.8.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,10 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.8.0 通用性：站点与页面形态识别集中成 SiteMatch 规则表。新增认领「网页里 iframe 嵌入的
+//       B 站播放器」「稍后再看 / 收藏夹 / 合集」「B 站课堂」，并从 URL 查询串抽 bvid/cid/aid
+//       （这些形态的视频号只在参数里）。通用站不再只认第一个 <video>，改为遍历全部、
+//       优先取带字幕轨道的那个，都没有则取时长最长的。
 // 9.7.0 面板主题与可见性：新增深色模式（跟随系统 / 深浅手动切），右下角 FAB 从纯图标圆点
 //       改成带「字幕」二字的胶囊（纯图标等于没人看得见），补齐 hover/active/焦点描边/细滚动条/
 //       入场动画与窄屏响应式。
@@ -1071,6 +1075,129 @@
     };
   }
   var RouteIdentity = createRouteIdentityModule();
+  /**
+   * 站点与页面形态识别（v9.8）。
+   *
+   * 背景：适配器的 match() 是三条各自为政的正则，散在主脚本里，加一个站要改三处，
+   * 改完还没测试。结果是「B 站嵌入播放器」「稍后再看 / 收藏夹 / 合集」这些真实存在的
+   * 页面形态根本不认——用户在博客里看到嵌的 B 站视频，右下角一个按钮都没有，
+   * 脚本等于不存在。
+   *
+   * 这里把「哪些 URL 我们认领」集中成一张表 + 纯函数，加站 = 加一行，且有测试兜底。
+   *
+   * 设计约束：
+   * 1. 纯函数，不碰 location / document——Node 里能完整测试。
+   * 2. 只认领「确实能拿到字幕」的形态。认领了却取不到，比不认领更伤信任
+   *    （所以直播回放、番剧详情页这种没有播放器/没有字幕的形态一律不认）。
+   * 3. 解析失败返回 null，绝不抛异常。
+   */
+  function createSiteMatchModule() {
+    // id：交给哪个适配器；form：页面形态（日志与测试用）
+    var RULES = [
+      // —— B 站 ——
+      { id: 'bilibili', form: 'video', host: /(^|\.)bilibili\.com$/i, path: /^\/video\/BV[0-9A-Za-z]+/i, note: '普通视频（含多 P）' },
+      { id: 'bilibili', form: 'video-av', host: /(^|\.)bilibili\.com$/i, path: /^\/video\/av[0-9]+/i, note: '老 av 号视频' },
+      { id: 'bilibili', form: 'bangumi', host: /(^|\.)bilibili\.com$/i, path: /^\/bangumi\/play\/(ep|ss)[0-9]+/i, note: '番剧 / 影视播放页' },
+      { id: 'bilibili', form: 'cheese', host: /(^|\.)bilibili\.com$/i, path: /^\/cheese\/play\/(ep|ss)[0-9]+/i, note: '课堂播放页' },
+      { id: 'bilibili', form: 'list', host: /(^|\.)bilibili\.com$/i, path: /^\/(list|medialist)\/(watchlater|fav|series|[A-Za-z0-9_-]+)/i, note: '稍后再看 / 收藏夹 / 合集播放页' },
+      // 嵌入播放器：博客、文档、课件里 iframe 嵌的 B 站播放器。油猴会在 iframe 内执行脚本，
+      // 以前这条不认，导致「网页里嵌的 B 站视频完全用不了」。
+      { id: 'bilibili', form: 'embed', host: /(^|\.)player\.bilibili\.com$/i, path: /^\/player\.html/i, note: '嵌入播放器（iframe）' },
+      // —— YouTube ——
+      { id: 'youtube', form: 'watch', host: /(^|\.)youtube\.com$/i, path: /^\/watch$/i, note: '观看页（?v=）' },
+      { id: 'youtube', form: 'embed', host: /(^|\.)youtube\.com$/i, path: /^\/embed\//i, note: '嵌入播放器' },
+      { id: 'youtube', form: 'shorts', host: /(^|\.)youtube\.com$/i, path: /^\/shorts\//i, note: 'Shorts' },
+      { id: 'youtube', form: 'live', host: /(^|\.)youtube\.com$/i, path: /^\/live\//i, note: '直播' },
+      { id: 'youtube', form: 'watch', host: /^youtu\.be$/i, path: /^\//, note: '短链' },
+      { id: 'youtube', form: 'watch', host: /(^|\.)youtube-nocookie\.com$/i, path: /^\/embed\//i, note: '隐私增强嵌入' }
+    ];
+  
+    function safeUrl(href) {
+      try { return new URL(String(href || '')); } catch (e) { return null; }
+    }
+    function hostOf(u) { return String(u.hostname || '').replace(/^www\./i, '').replace(/^m\./i, ''); }
+  
+    /**
+     * 认领一条 URL。返回 { id, form, note }，不认领返回 null。
+     */
+    function detect(href) {
+      var u = safeUrl(href);
+      if (!u) return null;
+      var host = hostOf(u);
+      var path = u.pathname || '/';
+      for (var i = 0; i < RULES.length; i++) {
+        var r = RULES[i];
+        if (!r.host.test(host)) continue;
+        if (!r.path.test(path)) continue;
+        // youtu.be 短链：路径必须带 11 位 ID，裸域名不算
+        if (r.form === 'watch' && /^youtu\.be$/i.test(host) && !/^\/[A-Za-z0-9_-]{11}/.test(path)) continue;
+        // youtube.com/watch 必须有 v 参数（光有 /watch 没有视频 ID 不算）
+        if (r.id === 'youtube' && r.form === 'watch' && /youtube\.com$/i.test(host) && !u.searchParams.get('v')) continue;
+        return { id: r.id, form: r.form, note: r.note };
+      }
+      return null;
+    }
+  
+    function siteOf(href) { var d = detect(href); return d ? d.id : null; }
+    function formOf(href) { var d = detect(href); return d ? d.form : null; }
+    function isCovered(href) { return !!detect(href); }
+  
+    /**
+     * 从 URL 抽视频参数。B 站的嵌入播放器 / 稍后再看 / 收藏夹这些形态，
+     * 视频号只出现在查询串里（?bvid=BVxxx&cid=123），pathname 里根本没有，
+     * 以前只从 pathname 找 BV，这些页面一律解析为空。
+     */
+    function videoParams(href) {
+      var out = { bvid: '', aid: '', cid: '', page: 1 };
+      var u = safeUrl(href);
+      if (!u) return out;
+      var p = u.searchParams;
+      var path = u.pathname || '';
+  
+      var bvid = String(p.get('bvid') || p.get('bv') || '').trim();
+      if (!/^BV[0-9A-Za-z]+$/i.test(bvid)) bvid = '';
+      if (!bvid) {
+        var m = path.match(/\/video\/(BV[0-9A-Za-z]+)/i);
+        if (m) bvid = m[1];
+      }
+      out.bvid = bvid;
+  
+      var aid = String(p.get('aid') || '').trim();
+      if (!/^\d+$/.test(aid)) aid = '';
+      if (!aid) {
+        var ma = path.match(/\/video\/av(\d+)/i);
+        if (ma) aid = ma[1];
+      }
+      out.aid = aid;
+  
+      var cid = String(p.get('cid') || '').trim();
+      out.cid = /^\d+$/.test(cid) ? cid : '';
+  
+      var page = parseInt(p.get('p') || p.get('page') || '1', 10);
+      out.page = isFinite(page) && page >= 1 ? page : 1;
+      return out;
+    }
+  
+    // 该页面是否值得显示入口按钮（认领的站点；通用站点交给 html5 的 <video> 探测）
+    function showEntryOn(href) {
+      var d = detect(href);
+      if (d) return true;
+      var u = safeUrl(href);
+      if (!u) return false;
+      return false;   // 通用站点由调用方再判 document.querySelector('video')
+    }
+  
+    return {
+      RULES: RULES,
+      detect: detect,
+      siteOf: siteOf,
+      formOf: formOf,
+      isCovered: isCovered,
+      videoParams: videoParams,
+      showEntryOn: showEntryOn
+    };
+  }
+  var SiteMatch = createSiteMatchModule();
   // </build:modules>
 
   // ===================== 状态 =====================
@@ -1489,7 +1616,10 @@
   // ---------- B站 ----------
   adapters.bilibili = {
     id: 'bilibili',
-    match: function () { return /^https?:\/\/(www\.)?bilibili\.com\/(video\/BV|bangumi\/play\/)/i.test(location.href); },
+    // v9.8：认领规则集中到 SiteMatch（普通视频 / av 号 / 番剧 / 课堂 / 稍后再看·收藏夹·合集 /
+    // 嵌入播放器）。以前只认 /video/BV 与 /bangumi/play/，嵌在别人网页里的 B 站播放器
+    // 和自己的稍后再看列表都不认——右下角一个按钮都没有，功能等于不存在。
+    match: function () { var d = SiteMatch.detect(location.href); return !!d && d.id === 'bilibili'; },
     resolve: async function () {
       var myGen = asrGen;   // 世代号：SPA 切视频后旧请求返回时不污染新视频 state（与 runAsr/switchLan 同一机制）
       var st = window.__INITIAL_STATE__ || {};
@@ -1507,9 +1637,15 @@
         if (st.epInfo && st.epInfo.duration && !state.duration) state.duration = Number(st.epInfo.duration) || 0;
       } catch (e) {}
       if (!state.title) { try { state.title = document.title.replace(/_哔哩哔哩.*/, '').trim(); } catch (e) {} }
+      // v9.8：嵌入播放器 / 稍后再看 / 收藏夹 这些形态，视频号只出现在查询串里
+      //（player.html?bvid=BVxxx&cid=123、list/watchlater?bvid=BVxxx）。
+      // 以前只从 pathname 找 BV，这些页面解析出来全是空，认领了也取不到字幕。
+      var up = SiteMatch.videoParams(location.href);
+      if (!state.bvid && up.bvid) state.bvid = up.bvid;
+      if (!state.aid && up.aid) state.aid = up.aid;
+      if (!state.cid && up.cid) state.cid = up.cid;
       if (!state.bvid) { var m = location.pathname.match(/BV\w+/); if (m) state.bvid = m[0]; }
-      var pm = location.search.match(/[?&]p=(\d+)/);
-      state.page = pm ? (parseInt(pm[1], 10) || 1) : 1;
+      state.page = up.page || 1;
       if (state.bvid) {
         try {
           var pl = JSON.parse(await gx('https://api.bilibili.com/x/player/pagelist?bvid=' + state.bvid, { timeout: 8000, retries: 1, referer: 'https://www.bilibili.com/' }));
@@ -1607,7 +1743,7 @@
   // ---------- YouTube ----------
   adapters.youtube = {
     id: 'youtube',
-    match: function () { return /(^|\.)youtube\.com$|youtube-nocookie\.com|youtu\.be/i.test(location.hostname); },
+    match: function () { var d = SiteMatch.detect(location.href); return !!d && d.id === 'youtube'; },
     resolve: async function () {
       var yt = window.ytInitialPlayerResponse || window.ytInitialData || {};
       var vd = yt.videoDetails || {};
@@ -1661,7 +1797,29 @@
     id: 'html5',
     match: function () { return !!document.querySelector('video'); },
     resolve: async function () {
-      var v = document.querySelector('video');
+      // v9.8：不再只认页面上第一个 <video>。很多页面（课件、新闻、文档站）第一个 video
+      // 是背景装饰或广告，真正的讲课视频在后面；只取第一个会让这些页面全部「无字幕」。
+      // 策略：优先取第一个带可用字幕轨道的 video，都没有则取时长最长的那个（主视频）。
+      var vids = [].slice.call(document.querySelectorAll('video'));
+      if (!vids.length) return false;
+      var v = null;
+      for (var vi = 0; vi < vids.length && !v; vi++) {
+        var ts = vids[vi].querySelectorAll('track');
+        for (var ti = 0; ti < ts.length; ti++) {
+          var kind = (ts[ti].getAttribute('kind') || '').toLowerCase();
+          if (kind && kind !== 'subtitles' && kind !== 'captions') continue;
+          if (!ts[ti].getAttribute('src')) continue;
+          v = vids[vi];
+          break;
+        }
+      }
+      if (!v) {
+        v = vids.slice().sort(function (a, b) {
+          var da = (a.duration && isFinite(a.duration)) ? a.duration : 0;
+          var db = (b.duration && isFinite(b.duration)) ? b.duration : 0;
+          return db - da;
+        })[0];
+      }
       if (!v) return false;
       state.html5Video = v;
       state.title = document.title || '视频';
@@ -4021,9 +4179,9 @@
     if (ad) { state.adapter = ad; ad.resolve().then(render); }
   }
 
-  // 站点是否值得显示 FAB（有视频 / B站 / YouTube）
+  // 站点是否值得显示 FAB（认领的站点，或页面里有 <video> 的通用站点）
   function isSupportedSite() {
-    return !!(adapters.bilibili.match() || adapters.youtube.match() || adapters.html5.match());
+    return !!(SiteMatch.isCovered(location.href) || adapters.html5.match());
   }
 
   /**

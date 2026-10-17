@@ -3,7 +3,7 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.7.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.8.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -28,7 +28,7 @@
 
 | 理由 | 具体表现 |
 |---|---|
-| **全网通用，不是一个站的专用工具** | B 站（含登录态 AI 字幕）、YouTube（含自动字幕）、任意网页 `<video>` 的 WebVTT，三套适配器自动认领 |
+| **全网通用，不是一个站的专用工具** | B 站（普通 / 番剧 / 课堂 / 稍后再看 / 收藏夹 / 合集 / **网页里 iframe 嵌入的播放器**）、YouTube（观看页 / 嵌入 / Shorts / 直播 / 短链）、任意网页 `<video>` 的 WebVTT。v9.8 起认领规则是一张可测试的表，不再散在三条正则里 |
 | **没有字幕才是它的主场** | 内置硅基流动 SenseVoice 云转写，把「无字幕视频」这条死路接活 |
 | **3 小时长音频真的能跑完** | v9.0 分段解码：不播放、不整段解码，按分片目录逐片取逐片解，内存恒定；v9.4 断点续传：每批约 2 分钟音频转完即落盘，刷新/误关/断网后重转自动跳过已完成部分，不花第二遍钱 |
 | **转写时一声不响** | 分段解码根本不播放；兜底路线全程静音（增益 0）。最小化页面照样跑 |
@@ -41,7 +41,7 @@
 | **换分 P 自动跟上** | v9.6：`?p=2` 切到下一 P，字幕自动重新获取（一次字幕请求，不烧 ASR 额度），导出文件名也不再永远写 `_P1` |
 | **有深色模式** | v9.7：默认跟随系统，面板头部 🌙/☀ 一键切，设置里可固定深浅。16 个主要交互区重新配色，且「漏覆盖一个元素」测试就红 |
 | **右下角那个按钮终于有字了** | v9.7：FAB 从 52px 纯图标圆点改成「🎬 字幕」胶囊。纯图标在首屏扫视里等于不存在——新用户根本不知道那是什么 |
-| **有测试兜底** | Node 单元测试 86 项 + 评分/质量 32 项 + 接线验证 95 项 + 路由/导出 25 条 + 主题/可见性 21 条，合计 259 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
+| **有测试兜底** | Node 单元测试 86 项 + 评分/质量 32 项 + 接线验证 95 项 + 路由/导出 25 条 + 主题/可见性 21 条 + 站点认领 15 条，合计 274 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**。
 
@@ -55,7 +55,17 @@
 |---|---|
 | B 站官方字幕 | WBI 签名稳定调用，人工字幕优先于 AI 字幕，中文优先于其他语种，多 P 视频自动跟 P |
 | YouTube 字幕 | 解析播放器响应里的字幕轨道，TTML 双形态时间戳全兼容，自动字幕标注 AI |
-| 通用网页 | 扫描 `<video>` 下的 `<track kind="subtitles|captions">`，WebVTT / SRT 都能吃 |
+| 通用网页 | 扫描 `<video>` 下的 `<track kind="subtitles\|captions">`，WebVTT / SRT 都能吃；v9.8 起遍历页面**所有** `<video>`（第一个往往是背景装饰，真正的讲课视频在后面） |
+
+**认领哪些页面**（v9.8 起是一张表，见 `modules/site-match.js`；没有播放器的页面一律不认领——认领了却取不到字幕，比不认领更伤信任）
+
+| 站点 | 认领的页面形态 |
+|---|---|
+| B 站 | `/video/BV…`、`/video/av…`、`/bangumi/play/ep\|ss`、`/cheese/play/ep\|ss`（课堂）、`/list/watchlater`·`/medialist`（稍后再看 / 收藏夹 / 合集）、`player.bilibili.com/player.html`（**别人网页里 iframe 嵌入的播放器**） |
+| YouTube | `/watch?v=`、`/embed/`、`/shorts/`、`/live/`、`youtu.be` 短链、`youtube-nocookie.com/embed/` |
+| 其他站点 | 页面里有 `<video>` 就出现，字幕从其 `<track>` 取 |
+
+> 不认领：B 站首页 / 分区页 / 专栏、直播回放、YouTube 首页——这些页面没有可取的播放器。`bilibili.com.evil.com` 这类钓鱼域名也不会被误认领（有测试）。
 
 ### 二、没字幕就 AI 听写（四层防线，v9.0 起首选分段解码）
 
@@ -318,6 +328,12 @@ Google 的策略要求调用方自备 Data API Key，脚本不内置任何 Key�
 **Q：点了评论区的「02:00」时间戳，字幕还在吗？**
 在。v9.6 起 `?t=` 锚点和 `spm_id_from` / `vd_source` 这类分享归因参数都不参与「换没换视频」的判断，只有真换了视频或换了分 P 才重置。以前点一下时间戳，取好的字幕就被整条清空，还得再点一次「⚡ 获取字幕」——那是事故，不是设计。
 
+**Q：在别人博客里嵌的 B 站播放器上能用吗？**
+能（v9.8 起）。以前只认 `bilibili.com/video/BV…`，嵌在别人网页里的播放器（`player.bilibili.com/player.html?bvid=…`）完全不认，右下角一个按钮都没有。现在这类页面一并认领，视频号从 URL 参数里取。
+
+**Q：稍后再看 / 收藏夹里看视频，怎么没按钮？**
+v9.8 起有了。这两个页面以前不在认领范围内，现在 `/list/watchlater`、`/medialist` 都认。
+
 **Q：为什么切到第 2 P 后字幕自己就换了？**
 默认开了「换分 P 后自动获取字幕」。`?p=2` 是另一条 cid，字幕本来就不一样，自动重取省得你手动点一次。它只发一次字幕接口请求，不会自动起 AI 转写，不烧额度。不想要就到 ⚙ 设置里关掉。
 
@@ -340,7 +356,8 @@ v9.6 起默认只复制到剪贴板——多数人是要把文字贴给 AI，落
 - ✅ **v9.5 · 权重预设一键切换（已完成）**：保守（省 ASR）/ 均衡 / 激进（追干货）三档胶囊按钮，一点即切、即时重排不需重新搜索；预设值先跑行为矩阵验差异再定，三档塌成一样测试即红；拖过滑块脱离预设后如实标「自定义」而非谎称仍在均衡档；预设键集完整性、getPreset 未知名回退、matchPreset 诚实性全部有断言。
 - ✅ **v9.6 · 锚点不再误伤 + 导出只复制（已完成）**：URL 只变锚点/追踪参数时字幕不再被清空（新增 route-identity 模块，按「视频身份」比较）；AI 文本 / 锚点稿不再复制+下载双触发，默认只复制；换分 P 自动重新获取字幕；分 P 号从 URL 读（导出文件名不再恒为 P1）。
 - ✅ **v9.7 · 深色模式 + 入口可见性（已完成）**：面板主题（跟随系统 / 深浅手动切），暗色覆盖完整性有测试兜底；FAB 从纯图标圆点改成「🎬 字幕」胶囊；补齐 hover/active/焦点描边/细滚动条/入场动画/窄屏响应式。
-- **v9.8（下一步）**：真实站点字幕语料回归集（fixtures）、YouTube 音频解流签名、更多站点适配（B 站番剧页/动态嵌入、西瓜、腾讯视频、微博视频）、字幕格式扩展（ASS / LRC / VTT）、字幕内搜索过滤、快捷键呼出面板。
+- ✅ **v9.8 · 通用性：认领表（已完成）**：站点/页面形态识别集中成 `SiteMatch` 规则表；新增认领「网页里 iframe 嵌入的 B 站播放器」「稍后再看 / 收藏夹 / 合集」「B 站课堂」；这些形态的视频号从 URL 查询串抽取并消毒；通用站不再只认第一个 `<video>`。
+- **v9.9（下一步）**：真实站点字幕语料回归集（fixtures）、YouTube 音频解流签名、更多站点（西瓜 / 腾讯视频 / 微博视频 / Vimeo）、字幕格式扩展（ASS / LRC / VTT）、字幕内搜索过滤、快捷键呼出面板。
 
 如果你希望优先做哪一项，欢迎在 Issues 里说一声。
 
@@ -354,6 +371,7 @@ node tests/test-scorer.js    # v9.1 新增：候选评分 / 搜索筛选纯函�
 node tests/test-wiring.js    # v9.2 新增：接线验证——模块函数有调用方 / UI 元素两侧都在 / 设置有持久化 / 版本号对齐，共 95 项断言
 node tests/test-route.js     # v9.6 新增：路由身份（锚点/追踪参数/换 P）+ 导出动作分派，25 条；含反向断言，旧的双触发与整条 href 比对一旦回潮立即红
 node tests/test-ui.js        # v9.7 新增：深色模式覆盖完整性 / FAB 可见文字 / 无障碍 / 交互反馈，21 条
+node tests/test-site.js      # v9.8 新增：站点与页面形态认领（B 站 7 种 + YouTube 6 种）/ 不认领清单 / 钓鱼域名 / URL 参数消毒，15 条
 node tests/check-docs.js     # 文档一致性门禁：README 的版本号/测试数必须和源码对得上（防手工改漏）
 node build.js                # 把 modules/*.js 同步进 bili-subtitle.user.js 的 build:modules 区
 node tests/serve.js          # 本地静态服务，端口 8765

@@ -31,5 +31,7 @@ jobs:
         run: node tests/test-route.js
       - name: 主题与可见性测试（21 条：暗色覆盖完整性 / FAB 可见文字 / 无障碍 / 交互反馈）
         run: node tests/test-ui.js
+      - name: 站点认领测试（15 条：页面形态认领 / 不认领清单 / 钓鱼域名 / URL 参数消毒）
+        run: node tests/test-site.js
       - name: 文档一致性门禁（版本号 / 测试数不得漂移）
         run: node tests/check-docs.js

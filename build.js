@@ -10,7 +10,8 @@ const modules = [
   { file: 'search-filter.js', init: 'var SearchFilter = createSearchFilterModule();' },
   { file: 'transcript-quality.js', init: 'var TranscriptQuality = createTranscriptQualityModule();' },
   { file: 'seg-resume.js', init: 'var SegResume = createSegResumeModule();' },
-  { file: 'route-identity.js', init: 'var RouteIdentity = createRouteIdentityModule();' }
+  { file: 'route-identity.js', init: 'var RouteIdentity = createRouteIdentityModule();' },
+  { file: 'site-match.js', init: 'var SiteMatch = createSiteMatchModule();' }
 ];
 
 function browserSource(file) {

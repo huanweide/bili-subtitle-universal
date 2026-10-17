@@ -23,5 +23,9 @@ jobs:
         run: node --check bili-subtitle.user.js
       - name: 单元测试
         run: node tests/run-tests.js
+      - name: 候选评分 / 转写质量测试（19 项）
+        run: node tests/test-scorer.js
+      - name: 接线验证测试（53 项：模块有定义还必须有调用方，UI 元素两侧都要在）
+        run: node tests/test-wiring.js
       - name: 文档一致性门禁（版本号 / 测试数不得漂移）
         run: node tests/check-docs.js

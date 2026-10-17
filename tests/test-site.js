@@ -12,6 +12,7 @@
  */
 
 var SiteMatch = require('../modules/site-match.js');
+var SubExport = require('../modules/sub-export.js');
 var fs = require('fs');
 var path = require('path');
 var SRC = fs.readFileSync(path.join(__dirname, '..', 'bili-subtitle.user.js'), 'utf8');
@@ -180,6 +181,75 @@ test('C6 认领规则表自带说明（加站的人知道自己在加什么）',
     ok(r.host instanceof RegExp && r.path instanceof RegExp, 'host 与 path 必须是正则');
   });
   ok(SiteMatch.RULES.length >= 12, '规则数不应少于 12，实际 ' + SiteMatch.RULES.length);
+});
+
+// ===================== D. v9.13 JS 挂的字幕轨（textTracks） =====================
+
+function cue(start, end, text) { return { startTime: start, endTime: end, text: text }; }
+
+test('D1 cuesToBody：把 TextTrack 的 cue 转成标准字幕（含去标签）', function () {
+  var cues = [cue(0, 2, '第一句'), cue(2, 4, '<i>第二句</i> 带标签')];
+  var body = SubExport.cuesToBody(cues);
+  eq(body.length, 2, '条数');
+  eq(body[0].content, '第一句', '第一句');
+  eq(body[1].content, '第二句 带标签', '标签必须剥掉');
+  eq(body[1].from, 2, '起点');
+  eq(body[1].to, 4, '终点');
+});
+
+test('D2 cuesToBody：空 cue 丢掉（否则导出一堆空行）', function () {
+  var body = SubExport.cuesToBody([cue(0, 2, '有效'), cue(2, 4, '   '), cue(4, 6, '')]);
+  eq(body.length, 1, '只剩有效那条');
+});
+
+test('D3 cuesToBody：结束时间缺失/倒挂时兜底 2 秒，绝不写 0', function () {
+  var body = SubExport.cuesToBody([cue(1, 0, '结束早于开始'), cue(3, null, '没有结束时间')]);
+  body.forEach(function (x, i) {
+    ok(x.to > x.from, '第 ' + i + ' 条 to 必须大于 from（实际 ' + x.to + ' / ' + x.from + '）');
+  });
+});
+
+test('D4 cuesToBody：按起点排序（JS 挂的轨道顺序未必有序）', function () {
+  var body = SubExport.cuesToBody([cue(5, 6, '后'), cue(0, 1, '先')]);
+  ok(body[0].from <= body[1].from, '必须按时间排好');
+  eq(body[0].content, '先', '第一条');
+});
+
+test('D5 cuesToBody：脏输入不崩（null / 非数组 / 缺字段）', function () {
+  eq(SubExport.cuesToBody(null).length, 0, 'null');
+  eq(SubExport.cuesToBody('不是数组').length, 0, '字符串');
+  eq(SubExport.cuesToBody([null, {}, cue(0, 1, '有效')]).length, 1, '缺字段的跳过');
+});
+
+test('D6 接线：html5 适配器在 DOM track 为空时会去查 video.textTracks', function () {
+  var zone = SRC.slice(SRC.indexOf('adapters.html5 = {'), SRC.indexOf('adapters.html5 = {') + 4000);
+  ok(/textTracks/.test(zone), '必须访问 textTracks');
+  ok(/SubExport\.cuesToBody\(tt\.cues\)/.test(zone), '必须用 cuesToBody 转换');
+  ok(/if \(!tt\.cues \|\| !tt\.cues\.length\) continue;/.test(zone), '空轨道要跳过');
+});
+
+test('D7 接线：只在 DOM track 拿不到时才用 textTracks（不重复、不覆盖）', function () {
+  var zone = SRC.slice(SRC.indexOf('adapters.html5 = {'), SRC.indexOf('adapters.html5 = {') + 4000);
+  ok(/if \(!Object\.keys\(byLan\)\.length && v\.textTracks/.test(zone), '必须是有 DOM track 就不走这条');
+});
+
+test('D8 接线：选视频时也认 textTracks（有 JS 轨道的 video 优先于最长的那个）', function () {
+  var zone = SRC.slice(SRC.indexOf('adapters.html5 = {'), SRC.indexOf('adapters.html5 = {') + 4000);
+  ok(/vids\[vj\]\.textTracks/.test(zone), '选视频阶段也要看 textTracks');
+});
+
+test('D9 接线：getSubBody 对没有 URL 的 cues 轨道直接取内存内容（不用发请求）', function () {
+  // 必须从 html5 适配器那段里找：YouTube 适配器也有同名方法，取第一个会验错对象
+  var h5 = SRC.slice(SRC.indexOf('adapters.html5 = {'));
+  var zone = h5.slice(h5.indexOf('getSubBody'), h5.indexOf('getSubBody') + 700);
+  ok(/if \(sub\.cues && sub\.cues\.length\)/.test(zone), '要优先用内存 cues');
+  ok(/mergeBodies\(\[\{ body: sub\.cues \}\]\)/.test(zone), '直接合并，不下载');
+});
+
+test('D10 反向断言：不允许把 cueless 轨道（kind 不对 / 空 cues）也建卡', function () {
+  var zone = SRC.slice(SRC.indexOf('adapters.html5 = {'), SRC.indexOf('adapters.html5 = {') + 4000);
+  ok(/if \(kk && kk !== 'subtitles' && kk !== 'captions'\) continue;/.test(zone), 'kind 不对要跳过');
+  ok(/if \(!cues\.length\) continue;/.test(zone), '转出来是空的要跳过');
 });
 
 console.log('----------------------------------------');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.12.0
+// @version      9.13.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1313,6 +1313,33 @@
       return out.join('\n');
     }
   
+    /**
+     * 把 TextTrack 的 cues 转成标准字幕数组（v9.13）。
+     *
+     * 背景：很多播放器（video.js / Plyr / DPlayer / 各类课件播放器）是用 JS
+     * `addTextTrack()` 把字幕挂上去的，DOM 里根本没有 <track> 元素——只扫 DOM 的话
+     * 这些页面一律被判「无字幕」，其实字幕就在 `video.textTracks` 里躺着。
+     *
+     * cue 是浏览器实时对象，text 可能带 <i>/<b> 等标签，也可能为空（空 cue 要丢掉）。
+     */
+    function cuesToBody(cues) {
+      var arr = (cues && typeof cues.length === 'number') ? cues : [];
+      var out = [];
+      for (var i = 0; i < arr.length; i++) {
+        var c = arr[i];
+        if (!c) continue;
+        var text = String(c.text == null ? '' : c.text).replace(/<[^>]+>/g, '').trim();
+        if (!text) continue;   // 空 cue 丢掉，否则导出一堆空行
+        var from = Number(c.startTime);
+        var to = Number(c.endTime);
+        if (!isFinite(from)) from = 0;
+        if (!isFinite(to) || to <= from) to = from + 2;   // 没有结束时间就给 2 秒，绝不写 0
+        out.push({ from: from, to: to, content: text });
+      }
+      out.sort(function (a, b) { return a.from - b.from; });
+      return out;
+    }
+  
     // 秒 → m:ss / h:mm:ss（给人看的时间点，用于 Markdown 与跳转提示）
     function fmtClock(sec) {
       var totalSec = Math.floor(Math.max(0, Number(sec) || 0));
@@ -1429,6 +1456,7 @@
       fmtClock: fmtClock,
       bodyToMd: bodyToMd,
       shiftBody: shiftBody,
+      cuesToBody: cuesToBody,
       bodyFrom: bodyFrom,
       bodyRange: bodyRange,
       AI_PROMPTS: AI_PROMPTS,
@@ -2056,6 +2084,8 @@
       // 策略：优先取第一个带可用字幕轨道的 video，都没有则取时长最长的那个（主视频）。
       var vids = [].slice.call(document.querySelectorAll('video'));
       if (!vids.length) return false;
+      // 选视频的优先级：① 有 DOM <track> 的 ② 有 JS 挂的 textTracks 且里面有 cues 的
+      // ③ 都没有就取时长最长的（主视频，不是背景装饰）
       var v = null;
       for (var vi = 0; vi < vids.length && !v; vi++) {
         var ts = vids[vi].querySelectorAll('track');
@@ -2065,6 +2095,19 @@
           if (!ts[ti].getAttribute('src')) continue;
           v = vids[vi];
           break;
+        }
+      }
+      if (!v) {
+        for (var vj = 0; vj < vids.length && !v; vj++) {
+          var tts = vids[vj].textTracks;
+          if (!tts || !tts.length) continue;
+          for (var tj = 0; tj < tts.length; tj++) {
+            var k2 = (tts[tj].kind || '').toLowerCase();
+            if (k2 && k2 !== 'subtitles' && k2 !== 'captions') continue;
+            if (!tts[tj].cues || !tts[tj].cues.length) continue;
+            v = vids[vj];
+            break;
+          }
         }
       }
       if (!v) {
@@ -2092,6 +2135,22 @@
         if (!byLan[lang]) byLan[lang] = { lan: lang, lan_doc: label, urls: [], ai: false };
         byLan[lang].urls.push(src);
       });
+      // v9.13：DOM 里没有 <track> 不代表没有字幕。很多播放器是用 JS addTextTrack 挂的
+      //（video.js / Plyr / DPlayer / 各类课件播放器），<track> 元素根本不存在——
+      // 只扫 DOM 的话这些页面一律被判「无字幕」，其实字幕就在 video.textTracks 里。
+      if (!Object.keys(byLan).length && v.textTracks && v.textTracks.length) {
+        for (var ti2 = 0; ti2 < v.textTracks.length; ti2++) {
+          var tt = v.textTracks[ti2];
+          var kk = (tt.kind || '').toLowerCase();
+          if (kk && kk !== 'subtitles' && kk !== 'captions') continue;
+          if (!tt.cues || !tt.cues.length) continue;
+          var cues = SubExport.cuesToBody(tt.cues);
+          if (!cues.length) continue;
+          var lan2 = tt.language || tt.label || 'unknown';
+          if (!byLan[lan2]) byLan[lan2] = { lan: lan2, lan_doc: tt.label || lan2, urls: [], ai: false, cues: cues };
+          else byLan[lan2].cues = (byLan[lan2].cues || []).concat(cues);
+        }
+      }
       state.subs = Object.keys(byLan).map(function (k) { return byLan[k]; }).sort(function (a, b) { return langScore(a) - langScore(b); });
       return true;
     },
@@ -2100,6 +2159,11 @@
       var sub = null;
       for (var i = 0; i < state.subs.length; i++) if (state.subs[i].lan === lan) sub = state.subs[i];
       if (!sub) throw new Error('未找到该语言字幕');
+      // v9.13：JS 挂上去的轨道（textTracks）没有可下载的 URL，cues 已经在内存里了，直接用
+      if (sub.cues && sub.cues.length) {
+        var direct = mergeBodies([{ body: sub.cues }]);
+        if (direct.length) return direct;
+      }
       var parts = await Promise.all(sub.urls.map(function (u) {
         return gx(u, { timeout: 30000, retries: 1, referer: location.href });
       }));

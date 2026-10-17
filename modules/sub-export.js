@@ -106,6 +106,33 @@ function createSubExportModule() {
     return out.join('\n');
   }
 
+  /**
+   * 把 TextTrack 的 cues 转成标准字幕数组（v9.13）。
+   *
+   * 背景：很多播放器（video.js / Plyr / DPlayer / 各类课件播放器）是用 JS
+   * `addTextTrack()` 把字幕挂上去的，DOM 里根本没有 <track> 元素——只扫 DOM 的话
+   * 这些页面一律被判「无字幕」，其实字幕就在 `video.textTracks` 里躺着。
+   *
+   * cue 是浏览器实时对象，text 可能带 <i>/<b> 等标签，也可能为空（空 cue 要丢掉）。
+   */
+  function cuesToBody(cues) {
+    var arr = (cues && typeof cues.length === 'number') ? cues : [];
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      var c = arr[i];
+      if (!c) continue;
+      var text = String(c.text == null ? '' : c.text).replace(/<[^>]+>/g, '').trim();
+      if (!text) continue;   // 空 cue 丢掉，否则导出一堆空行
+      var from = Number(c.startTime);
+      var to = Number(c.endTime);
+      if (!isFinite(from)) from = 0;
+      if (!isFinite(to) || to <= from) to = from + 2;   // 没有结束时间就给 2 秒，绝不写 0
+      out.push({ from: from, to: to, content: text });
+    }
+    out.sort(function (a, b) { return a.from - b.from; });
+    return out;
+  }
+
   // 秒 → m:ss / h:mm:ss（给人看的时间点，用于 Markdown 与跳转提示）
   function fmtClock(sec) {
     var totalSec = Math.floor(Math.max(0, Number(sec) || 0));
@@ -222,6 +249,7 @@ function createSubExportModule() {
     fmtClock: fmtClock,
     bodyToMd: bodyToMd,
     shiftBody: shiftBody,
+    cuesToBody: cuesToBody,
     bodyFrom: bodyFrom,
     bodyRange: bodyRange,
     AI_PROMPTS: AI_PROMPTS,

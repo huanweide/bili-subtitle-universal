@@ -28,6 +28,27 @@ function countOf(id, src) {
   return ((src || SRC).match(re) || []).length;
 }
 
+// 提取函数体（按花括号配对，遇到字符串/正则里的括号会数错——因此只用于
+// 本文件里那些不含花括号字面量的纯逻辑函数）。
+// 为什么必须有它：v9.5 的第一版断言用 [\s\S]*? 跨函数匹配，
+// 结果「refreshWeightSliders 里同步高亮」这条在真删掉调用后仍然 PASS——
+// 正则吃到了下一个函数里的同名调用。断言必须限定在被测函数体内才算数。
+function fnBody(name, src) {
+  const s = src || SRC;
+  const start = s.indexOf('function ' + name + '(');
+  if (start < 0) return '';
+  let depth = 0, seen = false;
+  for (let i = s.indexOf('{', start); i < s.length; i++) {
+    const c = s[i];
+    if (c === '{') { depth++; seen = true; }
+    else if (c === '}') {
+      depth--;
+      if (seen && depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return '';
+}
+
 // 模块源码（定义侧）：从 build.js 的清单反查文件
 function moduleSource(file) {
   return fs.readFileSync(path.join(__dirname, '..', 'modules', file), 'utf8');
@@ -71,6 +92,7 @@ WIRING.forEach(function (entry) {
 const UI_IDS = ['bsrPaneSub', 'bsrPaneSearch', 'bsrSearchBtn', 'bsrSearchKw', 'bsrSearchResults',
   'bsrSearchStatus', 'bsrSearchPlatform', 'bsrSearchOrder', 'bsrSearchNative', 'bsrSearchMinPlay',
   'bsrWeightBox', 'bsrWeightSliders', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
+  'bsrWeightPresets', 'bsrWeightPresetTip',
   'bsrResumeRow', 'bsrResumeTip', 'bsrAsrRestart',
   'bsrAiTxt', 'bsrAnchor', 'bsrCorrect', 'bsrPolishOn', 'bsrHotwordsOn', 'bsrLlmCorrect',
   'bsrCustomHotwords', 'bsrYtKey', 'bsrYtEye'];
@@ -118,6 +140,47 @@ check('JSON 保存/恢复默认后滑块回刷（两边不打架）',
 check('展开权重面板时滑块从当前设置回刷', /#bsrWeightToggle'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
 check('refreshWeightSliders 调用点足够（定义 + 展开/保存/重置/初始化 5 处）',
   countOf('refreshWeightSliders') >= 6, '实际 ' + countOf('refreshWeightSliders') + ' 处');
+
+// 9. v9.5 权重预设接线（三档按钮 = 改权重 + 高亮诚实 + 落盘即时生效）
+check('预设按钮按 WEIGHT_PRESETS 渲染（模块里加预设自动多一颗，不写死 HTML）',
+  /Object\.keys\(CandidateScorer\.WEIGHT_PRESETS\)\.forEach/.test(SRC)
+  && /data-preset="' \+ name/.test(SRC));
+check('按钮文案取 WEIGHT_PRESET_LABELS（英文键名兜底，不给用户看内部标识）',
+  /CandidateScorer\.WEIGHT_PRESET_LABELS\[name\] \|\| name/.test(SRC));
+// 这几条全部限定在被测函数体内判定（fnBody），不再用跨函数正则——
+// v9.5 第一版就是被 [\s\S]*? 喂饱的假绿灯
+check('点预设 → applyWeightPreset（getPreset 取值 + 落盘 + render 即时换档）',
+  /addEventListener\('click'[\s\S]{0,120}applyWeightPreset\(btn\.getAttribute\('data-preset'\)\)/.test(SRC)
+  && /CandidateScorer\.getPreset\(name\)/.test(fnBody('applyWeightPreset'))
+  && /saveSettings\(\)/.test(fnBody('applyWeightPreset'))
+  && /render\(\)/.test(fnBody('applyWeightPreset')));
+check('高亮用 matchPreset 判定，不靠猜（拖过滑块就转「自定义」）',
+  /CandidateScorer\.matchPreset\(currentWeightMap\(\)\)/.test(fnBody('syncPresetHighlight'))
+  && /tip\.textContent = '当前：' \+ \(cur \?/.test(fnBody('syncPresetHighlight')));
+check('自定义态有视觉区分（class custom），不假装还锁在某档上',
+  /tip\.classList\.toggle\('custom', !cur\)/.test(fnBody('syncPresetHighlight'))
+  && /\.bsr-wpreset-tip\.custom\{/.test(SRC));
+check('refreshWeightSliders 回刷完滑块之后才同步高亮（滑块一改立刻改口）',
+  /function refreshWeightSliders[\s\S]*\.bsr-wval'\)\.textContent[\s\S]*syncPresetHighlight\(\);/.test(
+    fnBody('refreshWeightSliders')));
+check('拖滑块落盘后也同步高亮',
+  /syncPresetHighlight\(\)/.test(fnBody('persistWeightsFromSliders')));
+check('预设按钮在初始化时建好（隐藏态建 DOM 无副作用，展开即时可用）',
+  /buildPresetButtons\(\);[\s\S]{0,80}refreshWeightSliders\(\);/.test(SRC));
+check('预设容器与提示行有 id 且已被 HTML 声明',
+  /id="bsrWeightPresets"/.test(SRC) && /id="bsrWeightPresetTip"/.test(SRC));
+
+// 10. v9.5 预设模块导出（UI 依赖的每个符号都得真导出，否则运行时空指针）
+['WEIGHT_PRESETS', 'WEIGHT_PRESET_LABELS', 'DEFAULT_PRESET', 'getPreset', 'matchPreset'].forEach(function (sym) {
+  var mod = moduleSource('candidate-scorer.js');
+  var exported = new RegExp(sym + ':').test(mod);
+  var defined = new RegExp('function ' + sym + '\\b').test(mod)
+    || new RegExp('var ' + sym + '\\s*=').test(mod);
+  check('CandidateScorer.' + sym + ' 已定义且已导出', defined && exported,
+    '定义=' + defined + ' 导出=' + exported);
+});
+check('UI 真的用到了 getPreset/matchPreset（导出了不引用 = 死代码，面板不亮）',
+  /CandidateScorer\.getPreset\(name\)/.test(SRC) && /CandidateScorer\.matchPreset\(currentWeightMap\(\)\)/.test(SRC));
 
 // 8. v9.4 断点续传接线（SegResume 模块 + 分段路接入 + 「重新开始」出口）
 check('SegResume 已实例化', /var SegResume = createSegResumeModule\(\);/.test(SRC));

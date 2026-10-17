@@ -1,19 +1,66 @@
 'use strict';
 
 function createCandidateScorerModule() {
-  // 默认权重必须集中、可序列化，设置面板才能让用户透明地调整，而不是散落在判断分支里。
-  var DEFAULT_WEIGHTS = {
-    nativeSubtitle: 42,
-    noNativeSubtitle: -38,
-    subtitleUnknown: -8,
-    durationIdeal: 14,
-    durationTooShort: -18,
-    durationTooLong: -20,
-    knowledgeCategory: 16,
-    knowledgeKeyword: 18,
-    favoriteLikeRatio: 14,
-    coinLikeRatio: 10,
-    excludeKeyword: -36
+  // 三套权重预设 = 三种「选片策略」，一键切换（v9.5）。
+  // 设计依据不是好看，是这 11 个权重的真实含义：它们在权衡两端——
+  // 一端是「省 ASR 成本」（nativeSubtitle / noNativeSubtitle），
+  // 另一端是「知识干货密度」（knowledgeCategory / knowledgeKeyword /
+  // favoriteLikeRatio / coinLikeRatio）。预设就沿这条轴设计：
+  //   costFirst（保守）：宁缺毋滥，无字幕基本否决，绝不为省事之外的理由烧 ASR；
+  //   balanced（均衡）  ：成本与干货大致对冲，是默认档；
+  //   qualityFirst（激进）：内容为王，没字幕但极干货的照样跑 ASR。
+  // 新增预设时键集合必须与 DEFAULT_WEIGHTS 一致，test-scorer 有断言钉死。
+  var WEIGHT_PRESETS = {
+    costFirst: {
+      nativeSubtitle: 70,
+      noNativeSubtitle: -70,
+      subtitleUnknown: -30,
+      durationIdeal: 12,
+      durationTooShort: -18,
+      durationTooLong: -25,
+      knowledgeCategory: 10,
+      knowledgeKeyword: 12,
+      favoriteLikeRatio: 6,
+      coinLikeRatio: 4,
+      excludeKeyword: -36
+    },
+    balanced: {
+      nativeSubtitle: 42,
+      noNativeSubtitle: -38,
+      subtitleUnknown: -8,
+      durationIdeal: 14,
+      durationTooShort: -18,
+      durationTooLong: -20,
+      knowledgeCategory: 16,
+      knowledgeKeyword: 18,
+      favoriteLikeRatio: 14,
+      coinLikeRatio: 10,
+      excludeKeyword: -36
+    },
+    qualityFirst: {
+      nativeSubtitle: 14,
+      noNativeSubtitle: -6,
+      subtitleUnknown: -4,
+      durationIdeal: 22,
+      durationTooShort: -22,
+      durationTooLong: -16,
+      knowledgeCategory: 26,
+      knowledgeKeyword: 30,
+      favoriteLikeRatio: 24,
+      coinLikeRatio: 18,
+      excludeKeyword: -46
+    }
+  };
+
+  var DEFAULT_PRESET = 'balanced';
+
+  // 均衡档就是默认权重——单一事实源，两处各写一份迟早会漂。
+  var DEFAULT_WEIGHTS = WEIGHT_PRESETS[DEFAULT_PRESET];
+
+  var WEIGHT_PRESET_LABELS = {
+    costFirst: '保守（省 ASR）',
+    balanced: '均衡',
+    qualityFirst: '激进（要干货）'
   };
 
   // 滑块面板的中文标签与取值范围。新增权重键时这里必须同步加一项：
@@ -53,6 +100,26 @@ function createCandidateScorerModule() {
       out[key] = isFinite(n) ? clamp(n, -100, 100) : DEFAULT_WEIGHTS[key];
     });
     return out;
+  }
+
+  function getPreset(name) {
+    // 未知预设名回退默认档：预设名来自 UI 的 data 属性，万一将来加了按钮忘了
+    // 同步导出，用户点到也不该炸——降级而不是崩。
+    return normalizeWeights(WEIGHT_PRESETS[name] || WEIGHT_PRESETS[DEFAULT_PRESET]);
+  }
+
+  function matchPreset(weights) {
+    // 当前权重恰好等于某套预设就返回预设名，否则 null（面板显示「自定义」）。
+    // 为什么要有这个判定：用户拖一下滑块就脱离预设了，面板却还高亮着「均衡」，
+    // 那是在骗人。null 才是诚实的答案。
+    var w = normalizeWeights(weights);
+    var names = Object.keys(WEIGHT_PRESETS);
+    for (var i = 0; i < names.length; i++) {
+      var p = WEIGHT_PRESETS[names[i]];
+      var same = Object.keys(p).every(function (key) { return p[key] === w[key]; });
+      if (same) return names[i];
+    }
+    return null;
   }
 
   function addReason(reasons, signal, weight, detail) {
@@ -139,6 +206,11 @@ function createCandidateScorerModule() {
     DEFAULT_WEIGHTS: Object.assign({}, DEFAULT_WEIGHTS),
     WEIGHT_LABELS: Object.assign({}, WEIGHT_LABELS),
     WEIGHT_RANGE: { min: WEIGHT_RANGE.min, max: WEIGHT_RANGE.max },
+    WEIGHT_PRESETS: JSON.parse(JSON.stringify(WEIGHT_PRESETS)),
+    WEIGHT_PRESET_LABELS: Object.assign({}, WEIGHT_PRESET_LABELS),
+    DEFAULT_PRESET: DEFAULT_PRESET,
+    getPreset: getPreset,
+    matchPreset: matchPreset,
     normalizeWeights: normalizeWeights,
     scoreCandidate: scoreCandidate
   };

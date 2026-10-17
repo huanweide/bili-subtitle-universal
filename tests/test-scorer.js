@@ -214,6 +214,94 @@ test('A8 WEIGHT_RANGE 与归一化截断边界同源（滑块到头 = 截断值�
     '超下限归一化后必须等于滑块最小值');
 });
 
+// ---------- v9.5 权重预设 ----------
+// 三个代表候选，用来验证预设「真的改变了排序」，而不只是换了一组好看的数字。
+var PRE_CAND = {
+  // 无字幕但极干货：知识分区 + 知识标题 + 收藏投币比都拉满
+  strongNoSub: {
+    hasNativeSubtitle: false, durationSec: 1800, typename: '科学科普',
+    title: '一文讲透傅里叶变换 从零入门', like: 1000, favorite: 500, coin: 300
+  },
+  // 有字幕但娱乐向：有字幕加分，但分区/标题/互动比全不占
+  subButFun: {
+    hasNativeSubtitle: true, durationSec: 600, typename: '音乐',
+    title: '钢琴演奏 现场版', like: 1000, favorite: 50, coin: 20
+  },
+  // 有字幕且干货：三档都该是 A（好内容不该被预设摆布）
+  subAndStrong: {
+    hasNativeSubtitle: true, durationSec: 2400, typename: '计算机技术',
+    title: '操作系统原理 保姆级教程', like: 2000, favorite: 900, coin: 500
+  },
+  // 无字幕且是直播回放：三档都该是 C（排除词必须硬生效，没有预设能把它捞进 A/B）
+  liveReplay: {
+    hasNativeSubtitle: false, durationSec: 5400, typename: '知识',
+    title: '公开课直播回放', like: 800, favorite: 60, coin: 30
+  }
+};
+function tierUnder(preset, item) {
+  return CandidateScorer.scoreCandidate(item, CandidateScorer.getPreset(preset)).tier;
+}
+function totalUnder(preset, item) {
+  return CandidateScorer.scoreCandidate(item, CandidateScorer.getPreset(preset)).total;
+}
+
+test('A9 每套预设的键集合与标签都与 DEFAULT_WEIGHTS 一致（v9.5 不做半套预设）', function () {
+  var dKeys = Object.keys(CandidateScorer.DEFAULT_WEIGHTS).sort();
+  var names = Object.keys(CandidateScorer.WEIGHT_PRESETS);
+  ok(names.length >= 3, '至少三套预设，实际 ' + names.length);
+  names.forEach(function (n) {
+    deepEq(Object.keys(CandidateScorer.WEIGHT_PRESETS[n]).sort(), dKeys,
+      '预设 ' + n + ' 缺键或多键：半套预设会让 getPreset 静默用默认值补齐，用户看不出');
+    ok(typeof CandidateScorer.WEIGHT_PRESET_LABELS[n] === 'string'
+      && CandidateScorer.WEIGHT_PRESET_LABELS[n].length > 0,
+      '预设标签不能为空（按钮会退化成英文键名）：' + n);
+  });
+  deepEq(Object.keys(CandidateScorer.WEIGHT_PRESET_LABELS).sort(), names.slice().sort(),
+    '预设名与预设标签必须一一对应');
+});
+
+test('A10 均衡档就是默认权重（单一事实源），getPreset 未知名回退默认', function () {
+  ok(typeof CandidateScorer.DEFAULT_PRESET === 'string'
+    && CandidateScorer.WEIGHT_PRESETS[CandidateScorer.DEFAULT_PRESET],
+    'DEFAULT_PRESET 必须指向真实存在的预设，实际 ' + CandidateScorer.DEFAULT_PRESET);
+  deepEq(CandidateScorer.getPreset('balanced'), CandidateScorer.normalizeWeights(CandidateScorer.DEFAULT_WEIGHTS),
+    '默认权重必须等于 balanced 预设（两处各写一份迟早漂）');
+  deepEq(CandidateScorer.getPreset('__not_exists__'), CandidateScorer.getPreset(CandidateScorer.DEFAULT_PRESET),
+    '未知预设名必须回退默认档，不能崩也不能返回空对象');
+});
+
+test('A11 matchPreset 精确匹配才返回预设名，微调后必须诚实返回 null', function () {
+  eq(CandidateScorer.matchPreset(CandidateScorer.getPreset('costFirst')), 'costFirst', '保守档应被识别');
+  eq(CandidateScorer.matchPreset(CandidateScorer.getPreset('qualityFirst')), 'qualityFirst', '激进档应被识别');
+  eq(CandidateScorer.matchPreset(null), CandidateScorer.DEFAULT_PRESET, '空配置应落在默认档上');
+  var tweaked = CandidateScorer.getPreset('balanced');
+  tweaked.nativeSubtitle = tweaked.nativeSubtitle + 1;   // 用户拖了一下滑块
+  eq(CandidateScorer.matchPreset(tweaked), null,
+    '拖动过滑块就不是任何预设了，必须返回 null（面板显示自定义）——返回预设名是在骗人');
+});
+
+test('A12 预设真的改变排序：保守压住无字幕干货，激进放行（v9.5 的意义所在）', function () {
+  // 保守（省 ASR）：无字幕的干货视频被打到 C，有字幕的娱乐视频进 A
+  eq(tierUnder('costFirst', PRE_CAND.strongNoSub), 'C',
+    '保守档应把无字幕干货压到 C（宁缺毋滥，不烧 ASR），实际 ' + totalUnder('costFirst', PRE_CAND.strongNoSub));
+  eq(tierUnder('costFirst', PRE_CAND.subButFun), 'A',
+    '保守档应把有字幕视频放进 A，实际 ' + totalUnder('costFirst', PRE_CAND.subButFun));
+  // 激进（要干货）：反过来
+  eq(tierUnder('qualityFirst', PRE_CAND.strongNoSub), 'A',
+    '激进档应把无字幕干货放进 A（内容为王），实际 ' + totalUnder('qualityFirst', PRE_CAND.strongNoSub));
+  ok(totalUnder('costFirst', PRE_CAND.subButFun) > totalUnder('qualityFirst', PRE_CAND.subButFun),
+    '同一视频在保守档得分必须高于激进档（有字幕是保守档的核心偏好）');
+});
+
+test('A13 预设不越权：又全又好的三档都是 A，命中排除词的三档都是 C', function () {
+  ['costFirst', 'balanced', 'qualityFirst'].forEach(function (p) {
+    eq(tierUnder(p, PRE_CAND.subAndStrong), 'A',
+      '有字幕且干货的视频在 ' + p + ' 档必须是 A（好内容不该被预设摆布）');
+    eq(tierUnder(p, PRE_CAND.liveReplay), 'C',
+      '命中排除词「直播回放」的视频在 ' + p + ' 档必须是 C（排除词硬生效，没有预设能捞它）');
+  });
+});
+
 // ============================================================
 // B. SearchFilter 纯函数
 // ============================================================

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.4.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
+// @version      9.5.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -32,6 +32,9 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.5.0 权重预设一键切换：滑块面板顶部加「保守（省 ASR）/ 均衡 / 激进（追干货）」三档
+//       胶囊按钮，一点即切、即时重排不需重新搜索；当前权重恰好等于某档就高亮该档，
+//       拖动过滑块脱离预设则如实标「自定义」（不谎称仍在均衡档）。
 // 9.4.0 分段转写断点续传：每批（约 2 分钟音频）完成即把「已完成批数 + 已转文字」
 //       落进本地存储，刷新页面/误关标签/网络中断后重转自动跳过已完成部分；断点
 //       24h 有效、按 BV 号 + P 号 + 音频地址识别；「↺ 重新开始」可放弃旧进度。
@@ -51,19 +54,66 @@
   // <build:modules>
   // 由 build.js 生成；请编辑 modules/*.js，不要直接修改本区。
   function createCandidateScorerModule() {
-    // 默认权重必须集中、可序列化，设置面板才能让用户透明地调整，而不是散落在判断分支里。
-    var DEFAULT_WEIGHTS = {
-      nativeSubtitle: 42,
-      noNativeSubtitle: -38,
-      subtitleUnknown: -8,
-      durationIdeal: 14,
-      durationTooShort: -18,
-      durationTooLong: -20,
-      knowledgeCategory: 16,
-      knowledgeKeyword: 18,
-      favoriteLikeRatio: 14,
-      coinLikeRatio: 10,
-      excludeKeyword: -36
+    // 三套权重预设 = 三种「选片策略」，一键切换（v9.5）。
+    // 设计依据不是好看，是这 11 个权重的真实含义：它们在权衡两端——
+    // 一端是「省 ASR 成本」（nativeSubtitle / noNativeSubtitle），
+    // 另一端是「知识干货密度」（knowledgeCategory / knowledgeKeyword /
+    // favoriteLikeRatio / coinLikeRatio）。预设就沿这条轴设计：
+    //   costFirst（保守）：宁缺毋滥，无字幕基本否决，绝不为省事之外的理由烧 ASR；
+    //   balanced（均衡）  ：成本与干货大致对冲，是默认档；
+    //   qualityFirst（激进）：内容为王，没字幕但极干货的照样跑 ASR。
+    // 新增预设时键集合必须与 DEFAULT_WEIGHTS 一致，test-scorer 有断言钉死。
+    var WEIGHT_PRESETS = {
+      costFirst: {
+        nativeSubtitle: 70,
+        noNativeSubtitle: -70,
+        subtitleUnknown: -30,
+        durationIdeal: 12,
+        durationTooShort: -18,
+        durationTooLong: -25,
+        knowledgeCategory: 10,
+        knowledgeKeyword: 12,
+        favoriteLikeRatio: 6,
+        coinLikeRatio: 4,
+        excludeKeyword: -36
+      },
+      balanced: {
+        nativeSubtitle: 42,
+        noNativeSubtitle: -38,
+        subtitleUnknown: -8,
+        durationIdeal: 14,
+        durationTooShort: -18,
+        durationTooLong: -20,
+        knowledgeCategory: 16,
+        knowledgeKeyword: 18,
+        favoriteLikeRatio: 14,
+        coinLikeRatio: 10,
+        excludeKeyword: -36
+      },
+      qualityFirst: {
+        nativeSubtitle: 14,
+        noNativeSubtitle: -6,
+        subtitleUnknown: -4,
+        durationIdeal: 22,
+        durationTooShort: -22,
+        durationTooLong: -16,
+        knowledgeCategory: 26,
+        knowledgeKeyword: 30,
+        favoriteLikeRatio: 24,
+        coinLikeRatio: 18,
+        excludeKeyword: -46
+      }
+    };
+  
+    var DEFAULT_PRESET = 'balanced';
+  
+    // 均衡档就是默认权重——单一事实源，两处各写一份迟早会漂。
+    var DEFAULT_WEIGHTS = WEIGHT_PRESETS[DEFAULT_PRESET];
+  
+    var WEIGHT_PRESET_LABELS = {
+      costFirst: '保守（省 ASR）',
+      balanced: '均衡',
+      qualityFirst: '激进（要干货）'
     };
   
     // 滑块面板的中文标签与取值范围。新增权重键时这里必须同步加一项：
@@ -103,6 +153,26 @@
         out[key] = isFinite(n) ? clamp(n, -100, 100) : DEFAULT_WEIGHTS[key];
       });
       return out;
+    }
+  
+    function getPreset(name) {
+      // 未知预设名回退默认档：预设名来自 UI 的 data 属性，万一将来加了按钮忘了
+      // 同步导出，用户点到也不该炸——降级而不是崩。
+      return normalizeWeights(WEIGHT_PRESETS[name] || WEIGHT_PRESETS[DEFAULT_PRESET]);
+    }
+  
+    function matchPreset(weights) {
+      // 当前权重恰好等于某套预设就返回预设名，否则 null（面板显示「自定义」）。
+      // 为什么要有这个判定：用户拖一下滑块就脱离预设了，面板却还高亮着「均衡」，
+      // 那是在骗人。null 才是诚实的答案。
+      var w = normalizeWeights(weights);
+      var names = Object.keys(WEIGHT_PRESETS);
+      for (var i = 0; i < names.length; i++) {
+        var p = WEIGHT_PRESETS[names[i]];
+        var same = Object.keys(p).every(function (key) { return p[key] === w[key]; });
+        if (same) return names[i];
+      }
+      return null;
     }
   
     function addReason(reasons, signal, weight, detail) {
@@ -189,6 +259,11 @@
       DEFAULT_WEIGHTS: Object.assign({}, DEFAULT_WEIGHTS),
       WEIGHT_LABELS: Object.assign({}, WEIGHT_LABELS),
       WEIGHT_RANGE: { min: WEIGHT_RANGE.min, max: WEIGHT_RANGE.max },
+      WEIGHT_PRESETS: JSON.parse(JSON.stringify(WEIGHT_PRESETS)),
+      WEIGHT_PRESET_LABELS: Object.assign({}, WEIGHT_PRESET_LABELS),
+      DEFAULT_PRESET: DEFAULT_PRESET,
+      getPreset: getPreset,
+      matchPreset: matchPreset,
       normalizeWeights: normalizeWeights,
       scoreCandidate: scoreCandidate
     };
@@ -2969,6 +3044,14 @@
       '.bsr-wrow label{flex:none;width:120px;color:#555;cursor:pointer;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.bsr-wrow input[type=range]{flex:1;min-width:0;height:16px;accent-color:#7C5CBF;cursor:pointer}' +
       '.bsr-wval{flex:none;width:36px;text-align:right;font-family:monospace;font-size:11px;color:#FB7299}' +
+      // v9.5 预设行：三档一键切换 + 当前档提示。按钮用胶囊样式，
+      // 选中态高亮（.on）；脱离预设后提示转「自定义」，不假装还锁在某档上。
+      '.bsr-wpresets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0}' +
+      '.bsr-wpresets button{flex:none;padding:3px 10px;font-size:11px;line-height:1.6;border:1px solid #e2e2e6;background:#fafafa;color:#555;border-radius:11px;cursor:pointer}' +
+      '.bsr-wpresets button:hover{border-color:#7C5CBF;color:#7C5CBF}' +
+      '.bsr-wpresets button.on{background:#7C5CBF;border-color:#7C5CBF;color:#fff}' +
+      '.bsr-wpreset-tip{font-size:10px;color:#999;margin-left:auto}' +
+      '.bsr-wpreset-tip.custom{color:#FB7299}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-keywrap{position:relative}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
@@ -3055,7 +3138,8 @@
       '      <div id="bsrSearchResults"></div>' +
       '      <div class="bsr-set" id="bsrWeightToggle">⚖ 评分权重（A/B/C 档怎么算）</div>' +
       '      <div class="bsr-wbox" id="bsrWeightBox">' +
-      '        <div class="bsr-wtip">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。拖滑块即时生效（松手即保存）；下面 JSON 是高级编辑，两边始终保持同步，清空 JSON 保存 = 恢复默认。</div>' +
+      '        <div class="bsr-wtip">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。三档预设是常用策略的快捷入口（保守省 ASR 成本 / 激进追干货密度）；拖滑块可微调，松手即保存。下面 JSON 是高级编辑，两边始终保持同步，清空 JSON 保存 = 恢复默认。</div>' +
+      '        <div class="bsr-wpresets" id="bsrWeightPresets"><span class="bsr-wpreset-tip" id="bsrWeightPresetTip"></span></div>' +
       '        <div id="bsrWeightSliders"></div>' +
       '        <textarea id="bsrWeights" spellcheck="false"></textarea>' +
       '        <div class="bsr-row" style="margin-top:6px">' +
@@ -3269,13 +3353,14 @@
       });
     }
     function refreshWeightSliders() {
-      if (!weightSlidersBuilt()) { buildWeightSliders(); return; }
+      if (!weightSlidersBuilt()) { buildWeightSliders(); syncPresetHighlight(); return; }
       var w = currentWeightMap();
       Array.prototype.forEach.call(root.querySelectorAll('#bsrWeightSliders .bsr-wrow'), function (row) {
         var v = w[row.getAttribute('data-w')];
         row.querySelector('input[type=range]').value = v;
         row.querySelector('.bsr-wval').textContent = (v > 0 ? '+' : '') + v;
       });
+      syncPresetHighlight();   // 高亮跟当前权重走：滑块一改就可能脱离预设，必须立刻转「自定义」
     }
     function syncSlidersToTextarea() {
       var map = {};
@@ -3289,7 +3374,46 @@
       SETTINGS.scoreWeights = root.querySelector('#bsrWeights').value;
       saveSettings();
       render();   // 当前搜索结果即时换档，不用重新搜索
+      syncPresetHighlight();   // 拖滑块多半已脱离预设，提示立刻改口
       toast('权重已保存，即时生效');
+    }
+    // ---- v9.5 权重预设：三档一键切换 ----
+    function buildPresetButtons() {
+      var bar = root.querySelector('#bsrWeightPresets');
+      if (!bar || bar.querySelector('button[data-preset]')) return;
+      var html = '';
+      // 按 WEIGHT_PRESETS 的键渲染，和滑块一样单一事实源：模块里加预设，这里自动多一颗按钮
+      Object.keys(CandidateScorer.WEIGHT_PRESETS).forEach(function (name) {
+        var label = CandidateScorer.WEIGHT_PRESET_LABELS[name] || name;
+        html += '<button type="button" data-preset="' + name + '">' + label + '</button>';
+      });
+      bar.insertAdjacentHTML('afterbegin', html);
+      Array.prototype.forEach.call(bar.querySelectorAll('button[data-preset]'), function (btn) {
+        btn.addEventListener('click', function () {
+          applyWeightPreset(btn.getAttribute('data-preset'));
+        });
+      });
+    }
+    function applyWeightPreset(name) {
+      var label = CandidateScorer.WEIGHT_PRESET_LABELS[name] || name;
+      SETTINGS.scoreWeights = JSON.stringify(CandidateScorer.getPreset(name), null, 1);
+      saveSettings();
+      var ta = root.querySelector('#bsrWeights');
+      if (ta) ta.value = SETTINGS.scoreWeights;
+      refreshWeightSliders();
+      render();   // 换档即时可见，不用重新搜索
+      toast('已切到「' + label + '」策略，即时生效');
+    }
+    function syncPresetHighlight() {
+      var bar = root.querySelector('#bsrWeightPresets');
+      var tip = root.querySelector('#bsrWeightPresetTip');
+      if (!bar || !tip) return;
+      var cur = CandidateScorer.matchPreset(currentWeightMap());
+      Array.prototype.forEach.call(bar.querySelectorAll('button[data-preset]'), function (btn) {
+        btn.classList.toggle('on', btn.getAttribute('data-preset') === cur);
+      });
+      tip.textContent = '当前：' + (cur ? (CandidateScorer.WEIGHT_PRESET_LABELS[cur] || cur) : '自定义');
+      tip.classList.toggle('custom', !cur);   // 脱档时标红，一眼看出「现在不是任何预设」
     }
     root.querySelector('#bsrWeightToggle').onclick = function () {
       root.querySelector('#bsrWeightBox').classList.toggle('show');
@@ -3350,6 +3474,7 @@
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
     root.querySelector('#bsrSearchMinPlay').value = String(search.minPlay);
     root.querySelector('#bsrWeights').value = SETTINGS.scoreWeights || JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
+    buildPresetButtons();     // v9.5：三档预设按钮（同一初始化位，隐藏态建 DOM 无副作用）
     refreshWeightSliders();   // 面板初始化就建好滑块（隐藏态建 DOM 无副作用），展开即时可用
     root.querySelector('#bsrYtEye').onclick = function () {
       var k = root.querySelector('#bsrYtKey');

@@ -35,7 +35,9 @@ jobs:
         run: node tests/test-site.js
       - name: 检索与导出测试（23 条：字幕内检索 / VTT 时间戳 / 快捷键 / 反向断言）
         run: node tests/test-sub.js
-      - name: 全功能验证矩阵（67 条：README 每条承诺都必须能在源码里指到证据）
+      - name: 全功能验证矩阵（73 条：README 每条承诺都必须能在源码里指到证据）
         run: node tests/test-claims.js
+      - name: 往返一致性测试（15 条：SRT / VTT 导出后再解析必须逐条相同）
+        run: node tests/test-roundtrip.js
       - name: 文档一致性门禁（版本号 / 测试数不得漂移）
         run: node tests/check-docs.js

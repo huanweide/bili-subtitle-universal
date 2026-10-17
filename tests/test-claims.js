@@ -121,6 +121,8 @@ claim('Markdown 导出', has('SubExport\\.bodyToMd') && has("\\.md'"));
 claim('AI 总结提示词一键复制（提示词 + 稿子一起复制）', has('AI_PROMPTS') && has('buildPrompt'));
 claim('时间轴偏移校正（转写时间轴对不上可整体挪，不产生负时间戳）', has('shiftBody') && has('shiftSec'));
 claim('只导出当前播放位置之后', has('bodyFrom') && has('rangeFrom'));
+claim('能写就能读回来：SRT / VTT 的导出器与解析器成对存在',
+  has('function bodyToSrt') && has('function parseSrt') && has('bodyToVtt') && has('function parseVtt'));
 
 // ===================== 九、安全与隐私承诺 =====================
 

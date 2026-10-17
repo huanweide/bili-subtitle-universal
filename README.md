@@ -20,6 +20,8 @@
 
 这个脚本把三件事合到一起：**取字幕、没字幕就听写、长视频也扛得住。**
 
+> **Topics（GitHub 仓库标签建议）**：`userscript` `tampermonkey` `bilibili` `youtube` `subtitle` `asr` `speech-to-text` `whisper` `sensevoice` `transcription` `javascript` `chinese`
+
 ---
 
 ## 为什么值得一个 Star

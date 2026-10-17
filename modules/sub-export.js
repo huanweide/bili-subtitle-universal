@@ -106,7 +106,71 @@ function createSubExportModule() {
     return out.join('\n');
   }
 
+  // 秒 → m:ss / h:mm:ss（给人看的时间点，用于 Markdown 与跳转提示）
+  function fmtClock(sec) {
+    var totalSec = Math.floor(Math.max(0, Number(sec) || 0));
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    var mm = h ? pad(m) : String(m);
+    return (h ? h + ':' : '') + mm + ':' + pad(s);
+  }
+
+  /**
+   * Markdown 稿：比 TXT 更适合丢进笔记软件 / 仓库 / 给 AI 当上下文。
+   * 行尾两个空格 = Markdown 软换行（否则相邻行会被渲染合并成一个大段落）。
+   */
+  function bodyToMd(body, meta) {
+    var m = meta || {};
+    var arr = Array.isArray(body) ? body : [];
+    var out = ['# ' + (m.title || '字幕'), ''];
+    var facts = [];
+    if (m.up) facts.push('UP：' + m.up);
+    if (m.lan) facts.push('字幕语言：' + m.lan);
+    if (m.page && m.totalPages && m.totalPages > 1) facts.push('分 P：' + m.page + '/' + m.totalPages);
+    facts.push('共 ' + arr.length + ' 条');
+    if (facts.length) { out.push('> ' + facts.join(' · '), ''); }
+    out.push('---', '');
+    for (var i = 0; i < arr.length; i++) {
+      if (!isLine(arr[i])) continue;
+      out.push('**[' + fmtClock(arr[i].from) + ']** ' + arr[i].content.trim() + '  ');
+    }
+    return out.join('\n');
+  }
+
+  // v9.10 AI 总结提示词：同类脚本都有「一键生成总结提示词」，本项目以前没有——
+  // 用户拿到稿子还得自己想怎么问。这里给四套现成的，点了直接复制「提示词 + 稿子」。
+  var AI_PROMPTS = [
+    { id: 'summary', name: '总结核心内容', text: '以下是视频字幕稿。请用 5–8 句话总结它的核心内容，保留关键结论与数字，不要复述流程。' },
+    { id: 'points', name: '提取关键要点', text: '以下是视频字幕稿。请提取 8–12 条关键要点，每条一句话，按出现顺序排列，保留专有名词原文。' },
+    { id: 'notes', name: '生成学习笔记', text: '以下是视频字幕稿。请整理成学习笔记：先列 3–5 个核心概念及解释，再列 3 条可立即实践的行动项。' },
+    { id: 'questions', name: '生成思考问题', text: '以下是视频字幕稿。请提出 5 个能检验是否真懂的问题（含参考答案要点），难度由浅入深。' }
+  ];
+
+  function getPrompt(id) {
+    for (var i = 0; i < AI_PROMPTS.length; i++) if (AI_PROMPTS[i].id === id) return AI_PROMPTS[i];
+    return null;
+  }
+
+  /**
+   * 拼「提示词 + 稿子」。稿子超长时截断并注明——剪贴板塞几万字既慢又可能被浏览器静默拒绝。
+   */
+  function buildPrompt(id, text, maxChars) {
+    var p = getPrompt(id);
+    if (!p) return '';
+    var cap = Math.max(1000, Number(maxChars) || 15000);
+    var bodyText = String(text == null ? '' : text);
+    var cut = false;
+    if (bodyText.length > cap) { bodyText = bodyText.slice(0, cap); cut = true; }
+    return p.text + '\n\n---\n\n' + bodyText + (cut ? '\n\n（稿子过长已截断至 ' + cap + ' 字，如需完整版请导出文件）' : '');
+  }
+
   return {
+    fmtClock: fmtClock,
+    bodyToMd: bodyToMd,
+    AI_PROMPTS: AI_PROMPTS,
+    getPrompt: getPrompt,
+    buildPrompt: buildPrompt,
     vttTime: fmtVtt,     // 对外仍叫 vttTime（语义清晰），对内改名只为避开提取正则
     bodyToVtt: bodyToVtt,
     searchBody: searchBody,

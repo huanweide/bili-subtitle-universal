@@ -139,7 +139,7 @@ test('U14 建好 UI 立刻落一次主题（避免第一帧闪白）', function 
 });
 
 test('U15 保存设置后立刻应用主题（不用等下次渲染）', function () {
-  var m = SRC.match(/SETTINGS\.theme = root\.querySelector\('#bsrTheme'\)\.value;[\s\S]{0,120}/);
+  var m = SRC.match(/SETTINGS\.theme = root\.querySelector\('#bsrTheme'\)\.value;[\s\S]{0,260}/);
   ok(!!m && /applyTheme\(\)/.test(m[0]), '保存后必须 applyTheme');
 });
 

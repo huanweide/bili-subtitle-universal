@@ -104,7 +104,7 @@ claim('章节锚点稿（只标大锚点）', has('bodyToAnchoredText'));
 claim('检索后导出只出命中行', has('activeBody'));
 claim('可选翻译（目标语言 × 模型）', has('translateTo') && has('translateModel'));
 
-// ===================== 八、v9.6–v9.9 新增承诺 =====================
+// ===================== 八、v9.6–v9.10 新增承诺 =====================
 
 claim('锚点/追踪参数不误伤（按视频身份比较）', has('RouteIdentity\\.isSameVideo'));
 claim('换分 P 自动重新获取字幕', has('autoFetchOnPageSwitch'));
@@ -116,6 +116,9 @@ claim('FAB 带可见文字', has('<span class="lb">字幕</span>'));
 claim('页面形态认领表（含 iframe 嵌入播放器）',
   has('SiteMatch\\.detect') && has("form: 'embed'") && has('player\\\\.bilibili'));
 claim('快捷键（输入框内不抢键）', has('hotkeysOn') && has("tagName === 'INPUT'"));
+claim('点击字幕行跳到视频对应时间（同类脚本标配，默认开可关）', has('seekTo') && has('clickSeekOn'));
+claim('Markdown 导出', has('SubExport\\.bodyToMd') && has("\\.md'"));
+claim('AI 总结提示词一键复制（提示词 + 稿子一起复制）', has('AI_PROMPTS') && has('buildPrompt'));
 
 // ===================== 九、安全与隐私承诺 =====================
 

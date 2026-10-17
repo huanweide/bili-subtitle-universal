@@ -219,6 +219,114 @@ test('C12 检索框只在有字幕时出现（没取字幕时不摆一个空框�
   ok(/fr\.style\.display = state\.body \? 'flex' : 'none'/.test(SRC), '要有字幕才显示');
 });
 
+// ===================== D. v9.10 Markdown / AI 提示词 =====================
+
+test('D1 fmtClock：给人看的时间点（m:ss，过小时才加 h）', function () {
+  eq(SubExport.fmtClock(0), '0:00', '零点');
+  eq(SubExport.fmtClock(65), '1:05', '1 分 5 秒');
+  eq(SubExport.fmtClock(3661), '1:01:01', '带小时时分钟补零');
+  eq(SubExport.fmtClock(-5), '0:00', '负数归零');
+  eq(SubExport.fmtClock('abc'), '0:00', '非数字归零');
+});
+
+test('D2 bodyToMd：标题 + 元信息 + 软换行（行尾两空格，否则渲染会被并成一个大段落）', function () {
+  var md = SubExport.bodyToMd(BODY, { title: '测试视频', up: '某UP', lan: 'zh-CN' });
+  var lines = md.split('\n');
+  eq(lines[0], '# 测试视频', '一级标题');
+  ok(md.indexOf('> UP：某UP') >= 0, '元信息行');
+  ok(md.indexOf('---') >= 0, '分隔线');
+  ok(/\n\*\*\[0:00\]\*\* 你好，欢迎来到本期节目  \n/.test(md), '条目格式与行尾两空格');
+  ok(md.indexOf('**[0:12]**') >= 0, '最后一条时间戳');
+});
+
+test('D3 bodyToMd 脏输入不崩（空 / null / 缺 meta）', function () {
+  ok(SubExport.bodyToMd([], {}).indexOf('# ') === 0, '空 body 也要有标题');
+  ok(typeof SubExport.bodyToMd(null, null) === 'string', 'null 也返回字符串');
+  ok(SubExport.bodyToMd([{ from: 0, to: 1, content: '有效' }, null], {}).indexOf('有效') >= 0, '跳过脏行');
+});
+
+test('D4 AI 提示词四套齐备（都有 id / name / 非空正文）', function () {
+  eq(SubExport.AI_PROMPTS.length, 4, '四套');
+  ['summary', 'points', 'notes', 'questions'].forEach(function (id) {
+    var p = SubExport.getPrompt(id);
+    ok(!!p, 'id ' + id + ' 要存在');
+    ok(!!p.name && p.text.length > 10, id + ' 要有名字与正文');
+  });
+});
+
+test('D5 getPrompt 未知名返回 null（调用方据此什么都不做，不复制垃圾）', function () {
+  ok(SubExport.getPrompt('nope') === null, '未知 id');
+  ok(SubExport.getPrompt('') === null, '空 id');
+});
+
+test('D6 buildPrompt：拼提示词 + 稿子；超长截断并注明（剪贴板塞几万字会被静默拒绝）', function () {
+  var full = SubExport.buildPrompt('summary', '短稿子', 15000);
+  ok(full.indexOf('短稿子') >= 0, '要带上稿子');
+  ok(full.indexOf('---') >= 0, '要有分隔');
+  var long = SubExport.buildPrompt('points', 'x'.repeat(20000), 15000);
+  ok(long.length < 16000, '必须截断，实际 ' + long.length);
+  ok(long.indexOf('已截断') >= 0, '要如实告诉用户截断了');
+});
+
+test('D7 buildPrompt 未知名返回空串（不复制没头没尾的东西）', function () {
+  eq(SubExport.buildPrompt('nope', '稿子', 15000), '', '未知 id');
+});
+
+// ===================== E. v9.10 接线 =====================
+
+test('E1 MD 导出：按钮 HTML + 绑定 + 走 bodyToMd 与 .md 后缀', function () {
+  ok(/id="bsrMd"/.test(SRC), '要有按钮');
+  ok(/#bsrMd'\)\.onclick/.test(SRC), '要有绑定');
+  ok(/SubExport\.bodyToMd\(activeBody\(\)/.test(SRC), '要走 bodyToMd(activeBody())');
+  ok(/\.md'/.test(SRC), '后缀 .md');
+});
+
+test('E2 AI 提示词区：HTML 两侧都在，按钮由 AI_PROMPTS 生成（不是手写死四行）', function () {
+  ok(/id="bsrPromptToggle"/.test(SRC), '折叠开关');
+  ok(/id="bsrPromptBox"/.test(SRC), '容器');
+  ok(/id="bsrPrompts"/.test(SRC), '按钮宿主');
+  ok(/SubExport\.AI_PROMPTS\.forEach/.test(SRC), '必须由模块数据生成');
+  ok(/b\.textContent = p\.name/.test(SRC), '按钮显示名字');
+  ok(/copyText\(SubExport\.buildPrompt\(/.test(SRC), '点击复制提示词+稿子');
+});
+
+test('E3 提示词带的是 activeBody（检索后只带命中行，不是整篇）', function () {
+  ok(/SubExport\.buildPrompt\(p\.id, bodyToTxt\(activeBody\(\)/.test(SRC), '要用 activeBody');
+});
+
+test('E4 点击字幕行跳转：textarea 有 onclick，按行号取时间点', function () {
+  ok(/#bsrOut'\)\.onclick/.test(SRC), '文本框要有点击处理');
+  ok(/selectionStart\)\.split\('\\n'\)\.length - 1/.test(SRC) || /slice\(0, this\.selectionStart\)\.split\('\\n'\)\.length - 1/.test(SRC), '要按光标算出行号');
+  ok(/\(activeBody\(\) \|\| \[\]\)\[lineIdx\]/.test(SRC), '行号对应到过滤后的字幕行');
+  ok(/seekTo\(item\.from\)/.test(SRC), '要跳到该行起点');
+});
+
+test('E5 seekTo：找不到播放器要明说，不能静默失败', function () {
+  ok(/function seekTo\(/.test(SRC), '要有 seekTo');
+  ok(/v\.currentTime = t;/.test(SRC), '必须真的改播放位置（只弹个提示不算跳转）');
+  ok(/找不到可跳转的播放器/.test(SRC), '没有播放器要提示');
+  ok(/跳转失败/.test(SRC), '写入失败也要提示');
+  ok(/toast\('已跳到 '/.test(SRC), '跳了要告诉用户跳到哪');
+});
+
+test('E6 seekTo 不强求播放（自动播放被拦也不能报错吓人）', function () {
+  var body = SRC.slice(SRC.indexOf('function seekTo('), SRC.indexOf('function seekTo(') + 700);
+  ok(/if \(v\.paused\)/.test(body), '只在暂停时尝试播放');
+  ok(/pr\.catch\(function \(\) \{\}\)/.test(body), '播放被拒要静默吞掉');
+});
+
+test('E7 点击跳转受设置控制（默认开，可在设置里关）', function () {
+  ok(/clickSeekOn: GM_getValue\('bsr_click_seek', true\)/.test(SRC), '默认开');
+  ok(/GM_setValue\('bsr_click_seek', SETTINGS\.clickSeekOn\)/.test(SRC), '要落盘');
+  ok(/#bsrClickSeek'\)\.checked = SETTINGS\.clickSeekOn/.test(SRC), '要回填');
+  ok(/SETTINGS\.clickSeekOn = root\.querySelector\('#bsrClickSeek'\)\.checked/.test(SRC), '保存要读 UI');
+  ok(/if \(!SETTINGS\.clickSeekOn \|\| !state\.body\) return;/.test(SRC), '关掉后点击不跳');
+});
+
+test('E8 文本框告诉用户可以点（不然没人知道能跳）', function () {
+  ok(/点某一行可以跳到视频的对应时间/.test(SRC), 'title 要写清楚');
+});
+
 console.log('----------------------------------------');
 console.log('PASS ' + passed + '/' + (passed + failed));
 if (failed > 0) { console.log('FAILED ' + failed + ' 条，以上 [FAIL] 行即详情'); process.exit(1); }

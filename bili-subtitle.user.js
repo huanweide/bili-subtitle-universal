@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.9.0
+// @version      9.10.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,8 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.10.0 竞品对标：点击字幕行跳到视频对应时间（同类脚本的标配，本项目以前只能看不能跳）、
+//        Markdown 导出、AI 总结提示词一键复制（四套现成模板，复制「提示词 + 稿子」直接粘给 AI）。
 // 9.9.0 功能性：字幕内检索（多词与语义，命中行即导出范围，零命中回退全文不导空文件）、
 //       VTT 导出、快捷键（Alt+S / Esc / Ctrl+Enter，输入框内不抢键，可关）；
 //       修 VTT 时间戳浮点进位（59.9996 秒曾写出 00:00:60.000，播放器拒收）。
@@ -1307,7 +1309,71 @@
       return out.join('\n');
     }
   
+    // 秒 → m:ss / h:mm:ss（给人看的时间点，用于 Markdown 与跳转提示）
+    function fmtClock(sec) {
+      var totalSec = Math.floor(Math.max(0, Number(sec) || 0));
+      var h = Math.floor(totalSec / 3600);
+      var m = Math.floor((totalSec % 3600) / 60);
+      var s = totalSec % 60;
+      var mm = h ? pad(m) : String(m);
+      return (h ? h + ':' : '') + mm + ':' + pad(s);
+    }
+  
+    /**
+     * Markdown 稿：比 TXT 更适合丢进笔记软件 / 仓库 / 给 AI 当上下文。
+     * 行尾两个空格 = Markdown 软换行（否则相邻行会被渲染合并成一个大段落）。
+     */
+    function bodyToMd(body, meta) {
+      var m = meta || {};
+      var arr = Array.isArray(body) ? body : [];
+      var out = ['# ' + (m.title || '字幕'), ''];
+      var facts = [];
+      if (m.up) facts.push('UP：' + m.up);
+      if (m.lan) facts.push('字幕语言：' + m.lan);
+      if (m.page && m.totalPages && m.totalPages > 1) facts.push('分 P：' + m.page + '/' + m.totalPages);
+      facts.push('共 ' + arr.length + ' 条');
+      if (facts.length) { out.push('> ' + facts.join(' · '), ''); }
+      out.push('---', '');
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        out.push('**[' + fmtClock(arr[i].from) + ']** ' + arr[i].content.trim() + '  ');
+      }
+      return out.join('\n');
+    }
+  
+    // v9.10 AI 总结提示词：同类脚本都有「一键生成总结提示词」，本项目以前没有——
+    // 用户拿到稿子还得自己想怎么问。这里给四套现成的，点了直接复制「提示词 + 稿子」。
+    var AI_PROMPTS = [
+      { id: 'summary', name: '总结核心内容', text: '以下是视频字幕稿。请用 5–8 句话总结它的核心内容，保留关键结论与数字，不要复述流程。' },
+      { id: 'points', name: '提取关键要点', text: '以下是视频字幕稿。请提取 8–12 条关键要点，每条一句话，按出现顺序排列，保留专有名词原文。' },
+      { id: 'notes', name: '生成学习笔记', text: '以下是视频字幕稿。请整理成学习笔记：先列 3–5 个核心概念及解释，再列 3 条可立即实践的行动项。' },
+      { id: 'questions', name: '生成思考问题', text: '以下是视频字幕稿。请提出 5 个能检验是否真懂的问题（含参考答案要点），难度由浅入深。' }
+    ];
+  
+    function getPrompt(id) {
+      for (var i = 0; i < AI_PROMPTS.length; i++) if (AI_PROMPTS[i].id === id) return AI_PROMPTS[i];
+      return null;
+    }
+  
+    /**
+     * 拼「提示词 + 稿子」。稿子超长时截断并注明——剪贴板塞几万字既慢又可能被浏览器静默拒绝。
+     */
+    function buildPrompt(id, text, maxChars) {
+      var p = getPrompt(id);
+      if (!p) return '';
+      var cap = Math.max(1000, Number(maxChars) || 15000);
+      var bodyText = String(text == null ? '' : text);
+      var cut = false;
+      if (bodyText.length > cap) { bodyText = bodyText.slice(0, cap); cut = true; }
+      return p.text + '\n\n---\n\n' + bodyText + (cut ? '\n\n（稿子过长已截断至 ' + cap + ' 字，如需完整版请导出文件）' : '');
+    }
+  
     return {
+      fmtClock: fmtClock,
+      bodyToMd: bodyToMd,
+      AI_PROMPTS: AI_PROMPTS,
+      getPrompt: getPrompt,
+      buildPrompt: buildPrompt,
       vttTime: fmtVtt,     // 对外仍叫 vttTime（语义清晰），对内改名只为避开提取正则
       bodyToVtt: bodyToVtt,
       searchBody: searchBody,
@@ -1369,7 +1435,9 @@
     // v9.6 面板主题：auto=跟随系统（默认）/ light=始终浅色 / dark=始终深色
     theme: GM_getValue('bsr_theme', 'auto'),
     // v9.9 快捷键：Alt+S 开合面板 / Esc 收起 / Ctrl+Enter 取字幕。可关（避免与站点快捷键打架）
-    hotkeysOn: GM_getValue('bsr_hotkeys', true)
+    hotkeysOn: GM_getValue('bsr_hotkeys', true),
+    // v9.10 点击字幕行跳到视频对应时间（同类脚本的标配交互），默认开
+    clickSeekOn: GM_getValue('bsr_click_seek', true)
   };
   function saveSettings() {
     try {
@@ -1395,6 +1463,7 @@
       GM_setValue('bsr_export_mode', SETTINGS.exportMode);
       GM_setValue('bsr_theme', SETTINGS.theme);
       GM_setValue('bsr_hotkeys', SETTINGS.hotkeysOn);
+      GM_setValue('bsr_click_seek', SETTINGS.clickSeekOn);
     } catch (e) { log('设置保存失败', e); }
   }
 
@@ -1445,13 +1514,7 @@
     return p(h, 2) + ':' + p(m, 2) + ':' + p(sec, 2) + ',' + p(ms, 3);
   }
   function bodyToTxt(body) { return body.map(function (x) { return x.content; }).join('\n'); }
-  // 秒 → m:ss / h:mm:ss（给人看的时间点，用于检索命中的时间跨度提示）
-  function fmtClock(sec) {
-    var s = Math.max(0, Math.floor(Number(sec) || 0));
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-    var mm = h ? (m < 10 ? '0' + m : String(m)) : String(m);
-    return (h ? h + ':' : '') + mm + ':' + (ss < 10 ? '0' + ss : String(ss));
-  }
+  // 秒 → m:ss / h:mm:ss 用 SubExport.fmtClock（模块里那份有测试，不在这里养第二份）
   function bodyToSrt(body) {
     var out = [];
     for (var i = 0; i < body.length; i++) {
@@ -3390,6 +3453,22 @@
     }
   }
 
+  /**
+   * v9.10 跳到视频的某个时间点（点击字幕行用）。
+   * 只改播放位置，不强求播放：自动播放可能被浏览器策略拦，拦了也不该报错吓人——
+   * 位置已经跳过去了，用户自己按播放即可。
+   */
+  function seekTo(sec) {
+    var v = state.html5Video || document.querySelector('video');
+    if (!v) { toast('这个页面找不到可跳转的播放器'); return; }
+    var t = Math.max(0, Number(sec) || 0);
+    try { v.currentTime = t; } catch (e) { toast('跳转失败'); return; }
+    toast('已跳到 ' + SubExport.fmtClock(t));
+    if (v.paused) {
+      try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e2) {}
+    }
+  }
+
   // ===================== v9.9 字幕内检索 =====================
   // 3 小时视频转出来的稿子有几千行，用户要的往往只是提到某个词的那几句。
   // 检索之后：① 文本框只显示命中行 ② 复制 / 导出一律只出命中行——
@@ -3517,6 +3596,11 @@
       '.bsr-mini:hover{transform:scale(1.04)}' +
       '.bsr-ops{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}' +
       '.bsr-ops .bsr-btn{flex:1;min-width:70px}' +
+      '.bsr-prompts{display:flex;gap:6px;flex-wrap:wrap}' +
+      '.bsr-prompts button{flex:none;padding:5px 10px;font-size:11px;line-height:1.6;border:1px solid #e2e2e6;background:#fafafa;color:#555;border-radius:11px;cursor:pointer;font-family:inherit}' +
+      '.bsr-prompts button:hover{border-color:#7C5CBF;color:#7C5CBF}' +
+      '.bsr-pbox{display:none;border:1px dashed #ddd;border-radius:8px;padding:8px;margin-top:6px}' +
+      '.bsr-pbox.show{display:block}' +
       '.bsr-subfind{display:flex;gap:6px;margin-bottom:6px}' +
       '.bsr-subfind .bsr-input{margin-bottom:0;flex:1;min-width:0}' +
       '.bsr-findinfo{font-size:10px;color:#7C5CBF;margin:0 0 6px;line-height:1.5}' +
@@ -3631,6 +3715,9 @@
       '#bsr-root[data-theme="dark"] .bsr-wpresets button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-wpreset-tip{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-findinfo{color:#b9a3ff}' +
+      '#bsr-root[data-theme="dark"] .bsr-pbox{border-color:#4a4a55}' +
+      '#bsr-root[data-theme="dark"] .bsr-prompts button{background:var(--bsr-soft);color:#c5c5cc;border-color:#3d3d47}' +
+      '#bsr-root[data-theme="dark"] .bsr-prompts button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-keywrap .eye{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.yes{background:#14352a;color:#5fd6a8}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.no{background:#3a2020;color:#ff9a9a}' +
@@ -3693,7 +3780,7 @@
       '      <button type="button" class="bsr-btn bsr-c" id="bsrFindClear" style="flex:none" title="清空检索，恢复全篇">✕</button>' +
       '    </div>' +
       '    <div class="bsr-findinfo" id="bsrFindInfo" style="display:none"></div>' +
-      '    <textarea class="bsr-ta" id="bsrOut" readonly placeholder="点击「获取字幕」后，字幕文字将显示在这里"></textarea>' +
+      '    <textarea class="bsr-ta" id="bsrOut" readonly title="点某一行可以跳到视频的对应时间（可在设置里关掉）" placeholder="点击「获取字幕」后，字幕文字将显示在这里；取到后点某一行可跳到视频对应时间"></textarea>' +
       '    <div class="bsr-ops" id="bsrOps" style="display:none">' +
       '      <button class="bsr-btn bsr-c" id="bsrCopy">📋 复制</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrTxt">⬇ TXT</button>' +
@@ -3701,10 +3788,16 @@
       '      <button class="bsr-btn bsr-t" id="bsrAiTxt" title="剥掉时间戳的纯文本，喂给 AI 做总结最省 token">🤖 AI 文本</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrAnchor" title="带章节级时间锚点，适合人读与跳转">⏱ 锚点稿</button>' +
       '      <button class="bsr-btn bsr-s" id="bsrVtt" title="WebVTT 格式，可挂播放器或导进剪辑软件">⬇ VTT</button>' +
+      '      <button class="bsr-btn bsr-s" id="bsrMd" title="Markdown，适合丢进笔记软件 / 仓库 / 给 AI 当上下文">⬇ MD</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCorrect" style="display:none" title="用 chat 模型只改错别字/同音字/专有名词，不改句式">✨ AI 纠错</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrAsrBtn" style="display:none">🎙 AI 转写</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrUnlock" style="display:none">▶ 解锁播放并继续（浏览器自动播放限制）</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCancel" style="display:none">✖ 取消</button>' +
+      '    </div>' +
+      '    <div class="bsr-set" id="bsrPromptToggle">🧠 AI 总结提示词（复制后直接粘给 AI）</div>' +
+      '    <div class="bsr-pbox" id="bsrPromptBox" style="display:none">' +
+      '      <div class="bsr-prompts" id="bsrPrompts"></div>' +
+      '      <div class="bsr-wtip" id="bsrPromptTip">点了就把「提示词 + 当前稿子」一起复制，粘进任意 AI 对话框即可。检索有命中时只带命中行。</div>' +
       '    </div>' +
       '    </div>' +
       '    <div class="bsr-pane" id="bsrPaneSearch">' +
@@ -3846,6 +3939,7 @@
       '        <option value="dark">始终深色</option>' +
       '      </select>' +
       '      <label class="chk"><input type="checkbox" id="bsrHotkeys" /> 快捷键：Alt+S 开合面板 · Esc 收起 · Ctrl/⌘+Enter 取字幕（输入框内不抢键）</label>' +
+      '      <label class="chk"><input type="checkbox" id="bsrClickSeek" /> 点击字幕某一行时，视频跳到对应时间</label>' +
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
@@ -3898,6 +3992,37 @@
     root.querySelector('#bsrVtt').onclick = function () {
       if (!state.body) return;
       download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.vtt', '\uFEFF' + SubExport.bodyToVtt(activeBody() || []), 'text/vtt;charset=utf-8');
+    };
+    root.querySelector('#bsrMd').onclick = function () {
+      if (!state.body) return;
+      var md = SubExport.bodyToMd(activeBody() || [], { title: state.title, up: state.up, lan: state.lan, page: state.page, totalPages: state.totalPages });
+      download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.md', '\uFEFF' + md, 'text/markdown;charset=utf-8');
+    };
+    // v9.10 AI 总结提示词：同类脚本基本都有「一键复制总结提示词」，本项目以前没有——
+    // 用户拿到稿子还得自己想怎么问。四套现成的，点了复制「提示词 + 稿子」直接粘给 AI。
+    var promptBox = root.querySelector('#bsrPromptBox');
+    root.querySelector('#bsrPromptToggle').onclick = function () {
+      if (!state.body) { toast('请先获取字幕'); return; }
+      promptBox.classList.toggle('show');
+    };
+    var promptsHost = root.querySelector('#bsrPrompts');
+    SubExport.AI_PROMPTS.forEach(function (p) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = p.name;
+      b.title = p.text;
+      b.onclick = function () {
+        if (!state.body) { toast('请先获取字幕'); return; }
+        copyText(SubExport.buildPrompt(p.id, bodyToTxt(activeBody() || []), 15000));
+      };
+      promptsHost.appendChild(b);
+    });
+    // v9.10 点击字幕行跳转：同类脚本的标配交互，本项目以前只能看不能跳
+    root.querySelector('#bsrOut').onclick = function () {
+      if (!SETTINGS.clickSeekOn || !state.body) return;
+      var lineIdx = this.value.slice(0, this.selectionStart).split('\n').length - 1;
+      var item = (activeBody() || [])[lineIdx];
+      if (item) seekTo(item.from);
     };
     // 检索框：输入即筛（不回车也生效），清空按钮恢复全篇
     var findInput = root.querySelector('#bsrFind');
@@ -3956,6 +4081,7 @@
       SETTINGS.exportMode = root.querySelector('#bsrExportMode').value;
       SETTINGS.theme = root.querySelector('#bsrTheme').value;
       SETTINGS.hotkeysOn = root.querySelector('#bsrHotkeys').checked;
+      SETTINGS.clickSeekOn = root.querySelector('#bsrClickSeek').checked;
       saveSettings();
       applyTheme();
       toast('设置已保存');
@@ -4134,6 +4260,7 @@
     root.querySelector('#bsrExportMode').value = SETTINGS.exportMode || 'copy';
     root.querySelector('#bsrTheme').value = SETTINGS.theme || 'auto';
     root.querySelector('#bsrHotkeys').checked = SETTINGS.hotkeysOn;
+    root.querySelector('#bsrClickSeek').checked = SETTINGS.clickSeekOn;
     root.querySelector('#bsrSearchPlatform').value = SETTINGS.searchPlatform;
     root.querySelector('#bsrSearchOrder').value = search.order;
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
@@ -4273,7 +4400,7 @@
         var span = SubExport.spanOf(res.body);
         fi.style.display = 'block';
         fi.textContent = res.matched
-          ? '命中 ' + res.matched + ' / ' + res.total + ' 条' + (span ? '（' + fmtClock(span.from) + ' ~ ' + fmtClock(span.to) + '）' : '') + ' · 复制与导出只出命中行'
+          ? '命中 ' + res.matched + ' / ' + res.total + ' 条' + (span ? '（' + SubExport.fmtClock(span.from) + ' ~ ' + SubExport.fmtClock(span.to) + '）' : '') + ' · 复制与导出只出命中行'
           : '没找到「' + state.searchKw + '」（全篇 ' + res.total + ' 条）· 复制与导出会导出全文';
       } else fi.style.display = 'none';
     }

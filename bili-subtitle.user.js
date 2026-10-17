@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.0.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；可选高质量翻译。
+// @version      9.2.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -31,8 +31,692 @@
 // @license      MIT
 // ==/UserScript==
 
+// 版本历史（详见 CHANGELOG.md）：
+// 9.1.0 搜索筛选 Tab（B站 wbi 搜索 + YouTube Data API）、可解释候选评分引擎（A/B/C 三档，
+//       权重设置面板可调）、转写质量三层提升（热词注入免费 / LLM 纠错付费默认关 /
+//       标点+断句+相邻去重默认开）、双形态导出、ASR 退避重试与失败进度上报。
+// 9.0.0 分段解码：按分片目录逐片下载+逐片解码，内存恒定，完全不播放。
+// 8.2.1 独立审查后的 12 处修复（含 2 处高危）。
+
 (function () {
   'use strict';
+
+  // <build:modules>
+  // 由 build.js 生成；请编辑 modules/*.js，不要直接修改本区。
+  function createCandidateScorerModule() {
+    // 默认权重必须集中、可序列化，设置面板才能让用户透明地调整，而不是散落在判断分支里。
+    var DEFAULT_WEIGHTS = {
+      nativeSubtitle: 42,
+      noNativeSubtitle: -38,
+      subtitleUnknown: -8,
+      durationIdeal: 14,
+      durationTooShort: -18,
+      durationTooLong: -20,
+      knowledgeCategory: 16,
+      knowledgeKeyword: 18,
+      favoriteLikeRatio: 14,
+      coinLikeRatio: 10,
+      excludeKeyword: -36
+    };
+  
+    var KNOWLEDGE_CATEGORY_RE = /(知识|科技|科普|校园|学习|教育|职场|计算机|编程|数码|财经|商业|公开课|讲座)/i;
+    var KNOWLEDGE_TITLE_RE = /(教程|讲解|保姆级|从零|入门|原理|拆解|复盘|一文讲透|how\s+to|explained|deep\s+dive|crash\s+course)/i;
+    var EXCLUDE_TITLE_RE = /(直播回放|reaction|挑战|翻唱|整活)/i;
+  
+    function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+  
+    function normalizeWeights(custom) {
+      var out = {};
+      Object.keys(DEFAULT_WEIGHTS).forEach(function (key) {
+        // 为什么：设置面板清空某项时存进来的是 null / 空串，而 Number(null)===0 会通过
+        // isFinite 检查，把「用户没配」误判成「配了 0 分」，信号被静默关掉。这里显式把
+        // null / undefined / '' 当未配置，回退默认值。
+        var raw = custom ? custom[key] : undefined;
+        var n = (raw == null || raw === '') ? NaN : Number(raw);
+        out[key] = isFinite(n) ? clamp(n, -100, 100) : DEFAULT_WEIGHTS[key];
+      });
+      return out;
+    }
+  
+    function addReason(reasons, signal, weight, detail) {
+      if (!weight) return;
+      reasons.push({ signal: signal, weight: weight, detail: detail });
+    }
+  
+    function ratioScore(value, fullAt, weight) {
+      if (!(value > 0)) return 0;
+      if (value >= fullAt) return weight;
+      if (value >= fullAt * 0.4) return Math.round(weight * 0.5);
+      return 0;
+    }
+  
+    function scoreCandidate(item, customWeights) {
+      item = item || {};
+      var w = normalizeWeights(customWeights);
+      var reasons = [];
+      var total = 0;
+      var hasSubtitle = item.hasNativeSubtitle;
+  
+      if (hasSubtitle === true || hasSubtitle === 'true') {
+        total += w.nativeSubtitle;
+        addReason(reasons, 'nativeSubtitle', w.nativeSubtitle, '检测到原生字幕，可避免昂贵 ASR');
+      } else if (hasSubtitle === false || hasSubtitle === 'false') {
+        total += w.noNativeSubtitle;
+        addReason(reasons, 'noNativeSubtitle', w.noNativeSubtitle, '未检测到原生字幕，需要 ASR');
+      } else {
+        total += w.subtitleUnknown;
+        addReason(reasons, 'subtitleUnknown', w.subtitleUnknown, '字幕状态未知，可能受登录态或风控影响');
+      }
+  
+      var duration = Number(item.durationSec) || 0;
+      if (duration >= 8 * 60 && duration <= 60 * 60) {
+        total += w.durationIdeal;
+        addReason(reasons, 'durationIdeal', w.durationIdeal, '时长位于 8–60 分钟的知识内容高密度区间');
+      } else if (duration > 0 && duration < 3 * 60) {
+        total += w.durationTooShort;
+        addReason(reasons, 'durationTooShort', w.durationTooShort, '时长不足 3 分钟');
+      } else if (duration > 2 * 60 * 60) {
+        total += w.durationTooLong;
+        addReason(reasons, 'durationTooLong', w.durationTooLong, '时长超过 2 小时，处理成本高');
+      }
+  
+      var category = String(item.typename || item.categoryTitle || item.category || '');
+      if (KNOWLEDGE_CATEGORY_RE.test(category)) {
+        total += w.knowledgeCategory;
+        addReason(reasons, 'knowledgeCategory', w.knowledgeCategory, '分区“' + category + '”属于知识/科技/学习/职场范围');
+      }
+  
+      var title = String(item.title || '');
+      var knowledgeHit = title.match(KNOWLEDGE_TITLE_RE);
+      if (knowledgeHit) {
+        total += w.knowledgeKeyword;
+        addReason(reasons, 'knowledgeKeyword', w.knowledgeKeyword, '标题命中知识词“' + knowledgeHit[0] + '”');
+      }
+  
+      var likes = Math.max(0, Number(item.like) || 0);
+      var favorites = Math.max(0, Number(item.favorite) || 0);
+      var coins = Math.max(0, Number(item.coin) || 0);
+      if (likes > 0) {
+        var favoriteRatio = favorites / likes;
+        var favoriteWeight = ratioScore(favoriteRatio, 0.35, w.favoriteLikeRatio);
+        total += favoriteWeight;
+        addReason(reasons, 'favoriteLikeRatio', favoriteWeight, '收藏/点赞=' + favoriteRatio.toFixed(2) + '，收藏意愿体现干货密度');
+  
+        var coinRatio = coins / likes;
+        var coinWeight = ratioScore(coinRatio, 0.2, w.coinLikeRatio);
+        total += coinWeight;
+        addReason(reasons, 'coinLikeRatio', coinWeight, '投币/点赞=' + coinRatio.toFixed(2) + '，付费式认可较强');
+      }
+  
+      var excludeHit = title.match(EXCLUDE_TITLE_RE);
+      if (excludeHit) {
+        total += w.excludeKeyword;
+        addReason(reasons, 'excludeKeyword', w.excludeKeyword, '标题命中排除词“' + excludeHit[0] + '”');
+      }
+  
+      total = clamp(Math.round(total), -100, 100);
+      return { total: total, reasons: reasons, tier: total >= 55 ? 'A' : (total >= 25 ? 'B' : 'C') };
+    }
+  
+    return {
+      DEFAULT_WEIGHTS: Object.assign({}, DEFAULT_WEIGHTS),
+      normalizeWeights: normalizeWeights,
+      scoreCandidate: scoreCandidate
+    };
+  }
+  var CandidateScorer = createCandidateScorerModule();
+  function createSearchFilterModule() {
+    function clampInt(n, min, max, fallback) {
+      n = parseInt(n, 10);
+      return isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+    }
+  
+    function encodeParams(obj) {
+      return Object.keys(obj).filter(function (key) {
+        return obj[key] !== undefined && obj[key] !== null && obj[key] !== '';
+      }).map(function (key) {
+        return encodeURIComponent(key) + '=' + encodeURIComponent(obj[key]);
+      }).join('&');
+    }
+  
+    function decodeHtml(text) {
+      return String(text == null ? '' : text)
+        .replace(/<[^>]*>/g, '')
+        .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+        .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(Number(n)); })
+        .trim();
+    }
+  
+    function parseCount(value) {
+      if (typeof value === 'number') return isFinite(value) ? value : 0;
+      var text = String(value == null ? '' : value).replace(/,/g, '').trim();
+      var n = parseFloat(text) || 0;
+      if (/亿/.test(text)) n *= 100000000;
+      else if (/万/.test(text)) n *= 10000;
+      return Math.round(n);
+    }
+  
+    function parseBiliDuration(value) {
+      if (typeof value === 'number') return Math.max(0, value);
+      var parts = String(value || '').split(':').map(Number);
+      if (!parts.length || parts.some(function (n) { return !isFinite(n); })) return 0;
+      var sec = 0;
+      for (var i = 0; i < parts.length; i++) sec = sec * 60 + parts[i];
+      return sec;
+    }
+  
+    function parseIsoDuration(value) {
+      var m = String(value || '').match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+      if (!m) return 0;
+      return Math.round((Number(m[1]) || 0) * 86400 + (Number(m[2]) || 0) * 3600 + (Number(m[3]) || 0) * 60 + (Number(m[4]) || 0));
+    }
+  
+    function toIsoDate(value) {
+      if (!value) return '';
+      if (typeof value === 'number' || /^\d+$/.test(String(value))) {
+        var n = Number(value);
+        if (n < 100000000000) n *= 1000;
+        var d = new Date(n);
+        return isNaN(d.getTime()) ? '' : d.toISOString();
+      }
+      var parsed = new Date(value);
+      return isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+    }
+  
+    function coerceSubtitleFlag(value) {
+      if (value == null || value === '') return null;
+      if (value === true || value === 'true') return true;
+      if (value === false || value === 'false') return false;
+      return !!value;
+    }
+  
+    function normalizeBilibili(item) {
+      item = item || {};
+      return {
+        id: item.bvid || String(item.aid || item.id || ''),
+        platform: 'bilibili',
+        bvid: item.bvid || '',
+        aid: item.aid || item.id || '',
+        cid: item.cid || null,
+        videoId: '',
+        title: decodeHtml(item.title),
+        author: decodeHtml(item.author || (item.owner && item.owner.name) || ''),
+        durationSec: parseBiliDuration(item.duration),
+        pubdate: toIsoDate(item.pubdate || item.created),
+        play: parseCount(item.play || (item.stat && item.stat.view)),
+        danmaku: parseCount(item.video_review || item.danmaku || (item.stat && item.stat.danmaku)),
+        like: parseCount(item.like || (item.stat && item.stat.like)),
+        coin: parseCount(item.coin || (item.stat && item.stat.coin)),
+        favorite: parseCount(item.favorites || item.favorite || (item.stat && item.stat.favorite)),
+        url: item.arcurl || (item.bvid ? 'https://www.bilibili.com/video/' + item.bvid : ''),
+        tid: item.typeid || item.tid || '',
+        typename: decodeHtml(item.typename || item.tname || ''),
+        desc: decodeHtml(item.description || item.desc || ''),
+        tags: decodeHtml(item.tag || ''),
+        mid: item.mid || (item.owner && item.owner.mid) || '',
+        // 为什么：布尔字段可能以字符串 'false' 形式从缓存/旧配置流入，!!'false' 会得到
+        // true，把「确定无字幕」误判成「有字幕」，评分引擎就不再重罚 ASR 成本。
+        hasNativeSubtitle: coerceSubtitleFlag(item.hasNativeSubtitle),
+        subtitleProbeError: ''
+      };
+    }
+  
+    function normalizeYouTube(searchItem, detail) {
+      searchItem = searchItem || {};
+      detail = detail || {};
+      var snippet = detail.snippet || searchItem.snippet || {};
+      var stats = detail.statistics || {};
+      var id = detail.id || (searchItem.id && searchItem.id.videoId) || '';
+      return {
+        id: id,
+        platform: 'youtube',
+        bvid: '',
+        aid: '',
+        cid: null,
+        videoId: id,
+        title: decodeHtml(snippet.title || ''),
+        author: decodeHtml(snippet.channelTitle || ''),
+        durationSec: parseIsoDuration(detail.contentDetails && detail.contentDetails.duration),
+        pubdate: toIsoDate(snippet.publishedAt),
+        play: parseCount(stats.viewCount),
+        danmaku: 0,
+        like: parseCount(stats.likeCount),
+        coin: 0,
+        favorite: parseCount(stats.favoriteCount),
+        url: id ? 'https://www.youtube.com/watch?v=' + id : '',
+        tid: snippet.categoryId || '',
+        typename: '',
+        desc: decodeHtml(snippet.description || ''),
+        tags: Array.isArray(snippet.tags) ? snippet.tags.join(',') : '',
+        channelId: snippet.channelId || '',
+        hasNativeSubtitle: !!(detail.contentDetails && detail.contentDetails.caption === 'true'),
+        subtitleProbeError: ''
+      };
+    }
+  
+    function randomDelayMs(random) {
+      var r = typeof random === 'function' ? random() : Math.random();
+      // 为什么：测试或调用方注入的 random 可能返回 NaN / 字符串，不设防会让延迟变成
+      // NaN，sleep(NaN) 立即返回，节流形同虚设，反而更容易触发 412 风控。
+      if (!isFinite(r)) r = 0.5;
+      return 800 + Math.floor(Math.max(0, Math.min(0.999999, r)) * 701);
+    }
+  
+    async function searchBilibili(keyword, opts, deps) {
+      opts = opts || {};
+      deps = deps || {};
+      if (!keyword || !String(keyword).trim()) throw new Error('请输入搜索关键词');
+      if (typeof deps.gx !== 'function' || typeof deps.getWbiKeys !== 'function' || typeof deps.wbiQuery !== 'function') throw new Error('B站搜索依赖未注入');
+  
+      var order = ['totalrank', 'click', 'pubdate', 'dm', 'stow'].indexOf(opts.order) >= 0 ? opts.order : 'totalrank';
+      var params = {
+        search_type: 'video',
+        keyword: String(keyword).trim(),
+        order: order,
+        duration: [0, 1, 2, 3, 4].indexOf(Number(opts.duration)) >= 0 ? Number(opts.duration) : 0,
+        tids: opts.tids || 0,
+        page: clampInt(opts.page, 1, 50, 1),
+        page_size: clampInt(opts.maxResults, 1, 50, 20)
+      };
+  
+      async function requestSearch(force) {
+        await deps.getWbiKeys(!!force);
+        var raw = await deps.gx('https://api.bilibili.com/x/web-interface/search/type?' + deps.wbiQuery(params), {
+          timeout: 15000,
+          retries: 2,
+          referer: 'https://www.bilibili.com/'
+        });
+        return JSON.parse(raw);
+      }
+  
+      var response = await requestSearch(false);
+      if (response.code === -403) response = await requestSearch(true);
+      if (response.code !== 0) throw new Error('B站搜索失败 code=' + response.code + (response.message ? '：' + response.message : ''));
+  
+      var source = (response.data && response.data.result) || [];
+      var items = source.slice(0, params.page_size).map(normalizeBilibili);
+      if (opts.inspectSubtitles === false) return items;
+  
+      // 判字幕必须逐条请求 player/v2；800–1500ms 的候选级节流是为了降低 412 风控概率。
+      for (var i = 0; i < items.length; i++) {
+        if (i > 0 && typeof deps.sleep === 'function') await deps.sleep(randomDelayMs(deps.random));
+        var candidate = items[i];
+        try {
+          var viewRaw = await deps.gx('https://api.bilibili.com/x/web-interface/view?bvid=' + encodeURIComponent(candidate.bvid), {
+            timeout: 10000,
+            retries: 1,
+            referer: 'https://www.bilibili.com/'
+          });
+          var view = JSON.parse(viewRaw);
+          if (view.code === 0 && view.data) {
+            var v = view.data;
+            candidate.aid = v.aid || candidate.aid;
+            candidate.cid = v.cid || (v.pages && v.pages[0] && v.pages[0].cid) || candidate.cid;
+            candidate.author = (v.owner && v.owner.name) || candidate.author;
+            candidate.durationSec = Number(v.duration) || candidate.durationSec;
+            candidate.pubdate = toIsoDate(v.pubdate) || candidate.pubdate;
+            candidate.play = parseCount(v.stat && v.stat.view) || candidate.play;
+            candidate.danmaku = parseCount(v.stat && v.stat.danmaku) || candidate.danmaku;
+            // 为什么：like/coin/favorite 原先漏写了 `|| candidate.like` 兜底——view 接口
+            // 偶尔不返回 stat 或字段为 0 时，会把搜索结果里已有的有效值清零，评分时
+            // 收藏比直接失真。与上下相邻字段保持一致的兜底语义。
+            candidate.like = parseCount(v.stat && v.stat.like) || candidate.like;
+            candidate.coin = parseCount(v.stat && v.stat.coin) || candidate.coin;
+            candidate.favorite = parseCount(v.stat && v.stat.favorite) || candidate.favorite;
+            candidate.tid = v.tid || candidate.tid;
+            candidate.typename = v.tname || candidate.typename;
+            candidate.desc = v.desc || candidate.desc;
+          }
+          if (!candidate.cid) throw new Error('无法取得 cid');
+          var playerRaw = await deps.gx('https://api.bilibili.com/x/player/v2?bvid=' + encodeURIComponent(candidate.bvid) + '&cid=' + encodeURIComponent(candidate.cid), {
+            timeout: 10000,
+            retries: 0,
+            referer: 'https://www.bilibili.com/'
+          });
+          var player = JSON.parse(playerRaw);
+          if (player.code !== 0) throw new Error('player/v2 code=' + player.code);
+          var subtitles = player.data && player.data.subtitle && player.data.subtitle.subtitles;
+          candidate.hasNativeSubtitle = !!(subtitles && subtitles.length);
+        } catch (error) {
+          candidate.hasNativeSubtitle = null;
+          candidate.subtitleProbeError = String(error && error.message || error);
+        }
+        if (typeof opts.onProbe === 'function') opts.onProbe(i + 1, items.length, candidate);
+      }
+      return items;
+    }
+  
+    async function searchYouTube(keyword, opts, deps) {
+      opts = opts || {};
+      deps = deps || {};
+      if (!keyword || !String(keyword).trim()) throw new Error('请输入搜索关键词');
+      if (!opts.apiKey) throw new Error('请先在设置中填写 YouTube Data API Key');
+      if (typeof deps.gx !== 'function') throw new Error('YouTube 搜索依赖未注入');
+  
+      var maxResults = clampInt(opts.maxResults, 1, 50, 20);
+      var searchParams = {
+        part: 'snippet',
+        type: 'video',
+        q: String(keyword).trim(),
+        maxResults: maxResults,
+        key: opts.apiKey,
+        order: opts.order || 'relevance',
+        videoCaption: opts.nativeOnly ? 'closedCaption' : (opts.videoCaption || 'any'),
+        videoDuration: opts.videoDuration || undefined,
+        videoDefinition: opts.videoDefinition || undefined,
+        videoCategoryId: opts.videoCategoryId || undefined,
+        channelId: opts.channelId || undefined,
+        publishedAfter: opts.publishedAfter || undefined,
+        publishedBefore: opts.publishedBefore || undefined,
+        relevanceLanguage: opts.relevanceLanguage || undefined
+      };
+      var raw = await deps.gx('https://www.googleapis.com/youtube/v3/search?' + encodeParams(searchParams), { timeout: 20000, retries: 2 });
+      var searchData = JSON.parse(raw);
+      if (searchData.error) throw new Error('YouTube 搜索失败：' + (searchData.error.message || searchData.error.code));
+      var searchItems = searchData.items || [];
+      var ids = searchItems.map(function (item) { return item.id && item.id.videoId; }).filter(Boolean);
+      if (!ids.length) return [];
+  
+      var detailRaw = await deps.gx('https://www.googleapis.com/youtube/v3/videos?' + encodeParams({
+        part: 'snippet,contentDetails,statistics',
+        id: ids.join(','),
+        key: opts.apiKey
+      }), { timeout: 20000, retries: 2 });
+      var detailData = JSON.parse(detailRaw);
+      if (detailData.error) throw new Error('YouTube 视频详情失败：' + (detailData.error.message || detailData.error.code));
+      var details = {};
+      (detailData.items || []).forEach(function (item) { details[item.id] = item; });
+      return searchItems.map(function (item) {
+        var id = item.id && item.id.videoId;
+        return normalizeYouTube(item, details[id]);
+      }).filter(function (item) { return !!item.videoId; });
+    }
+  
+    function filterCandidates(items, opts) {
+      opts = opts || {};
+      var minDuration = Math.max(0, Number(opts.minDurationSec) || 0);
+      var maxDuration = Math.max(0, Number(opts.maxDurationSec) || 0);
+      var minPlay = Math.max(0, Number(opts.minPlay) || 0);
+      var minScore = Number(opts.minScore);
+      var after = opts.publishedAfter ? new Date(opts.publishedAfter).getTime() : 0;
+      return (items || []).filter(function (item) {
+        var duration = Number(item.durationSec) || 0;
+        if (minDuration && duration < minDuration) return false;
+        if (maxDuration && duration > maxDuration) return false;
+        if ((Number(item.play) || 0) < minPlay) return false;
+        if (opts.nativeOnly && item.hasNativeSubtitle !== true) return false;
+        if (isFinite(minScore) && item.score && item.score.total < minScore) return false;
+        if (after && (!item.pubdate || new Date(item.pubdate).getTime() < after)) return false;
+        return true;
+      });
+    }
+  
+    function extractJsonObject(text, start) {
+      var begin = text.indexOf('{', start);
+      if (begin < 0) return null;
+      var depth = 0, quote = false, escaped = false;
+      for (var i = begin; i < text.length; i++) {
+        var ch = text[i];
+        if (quote) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') quote = false;
+          continue;
+        }
+        if (ch === '"') quote = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}' && --depth === 0) return text.slice(begin, i + 1);
+      }
+      return null;
+    }
+  
+    function extractYouTubeCaptionTracks(html) {
+      var text = String(html || '');
+      var marker = text.indexOf('ytInitialPlayerResponse');
+      while (marker >= 0) {
+        var jsonText = extractJsonObject(text, marker);
+        if (jsonText) {
+          try {
+            var data = JSON.parse(jsonText);
+            var list = data.captions && data.captions.playerCaptionsTracklistRenderer && data.captions.playerCaptionsTracklistRenderer.captionTracks;
+            if (list && list.length) return list;
+          } catch (error) {}
+        }
+        marker = text.indexOf('ytInitialPlayerResponse', marker + 24);
+      }
+      return [];
+    }
+  
+    async function fetchYouTubeSubtitle(candidate, deps) {
+      deps = deps || {};
+      if (!candidate || !candidate.videoId) throw new Error('缺少 YouTube videoId');
+      if (typeof deps.gx !== 'function' || typeof deps.parseTtml !== 'function') throw new Error('YouTube 字幕依赖未注入');
+      var html = await deps.gx('https://www.youtube.com/watch?v=' + encodeURIComponent(candidate.videoId), {
+        timeout: 30000,
+        retries: 1,
+        referer: 'https://www.youtube.com/'
+      });
+      var tracks = extractYouTubeCaptionTracks(html);
+      if (!tracks.length) throw new Error('视频页未暴露可下载字幕轨道');
+      tracks.sort(function (a, b) {
+        function rank(t) {
+          var lan = String(t.languageCode || '').toLowerCase();
+          var langRank = /^zh/.test(lan) ? 0 : (/^en/.test(lan) ? 1 : 2);
+          return langRank + (t.kind === 'asr' ? 10 : 0);
+        }
+        return rank(a) - rank(b);
+      });
+      var url = tracks[0].baseUrl;
+      if (!url) throw new Error('字幕轨道缺少下载地址');
+      var ttml = await deps.gx(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'fmt=ttml', {
+        timeout: 30000,
+        retries: 1,
+        referer: 'https://www.youtube.com/'
+      });
+      var body = deps.parseTtml(ttml);
+      if (!body || !body.length) throw new Error('YouTube 字幕内容为空');
+      return body;
+    }
+  
+    return {
+      parseCount: parseCount,
+      parseBiliDuration: parseBiliDuration,
+      parseIsoDuration: parseIsoDuration,
+      randomDelayMs: randomDelayMs,
+      normalizeBilibili: normalizeBilibili,
+      normalizeYouTube: normalizeYouTube,
+      searchBilibili: searchBilibili,
+      searchYouTube: searchYouTube,
+      filterCandidates: filterCandidates,
+      extractYouTubeCaptionTracks: extractYouTubeCaptionTracks,
+      fetchYouTubeSubtitle: fetchYouTubeSubtitle
+    };
+  }
+  var SearchFilter = createSearchFilterModule();
+  function createTranscriptQualityModule() {
+    function normalizeText(text) {
+      return String(text == null ? '' : text).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    }
+  
+    function splitTerms(value) {
+      if (Array.isArray(value)) return value.reduce(function (all, item) { return all.concat(splitTerms(item)); }, []);
+      return String(value || '').split(/[\n,，、;；|/]+|\s{2,}/).map(normalizeText).filter(Boolean);
+    }
+  
+    function buildHotwords(meta, customTerms) {
+      meta = meta || {};
+      var raw = [];
+      raw.push(meta.title, meta.author || meta.up, meta.typename || meta.category);
+      raw = raw.concat(splitTerms(meta.tags));
+      raw = raw.concat(splitTerms(customTerms));
+      // 标题和简介本身就是最相关的免费上下文；只取短片段，避免把长简介整体塞进请求。
+      raw = raw.concat(splitTerms(String(meta.title || '').replace(/[：:｜|【】()[\]（）—_-]+/g, '，')));
+      raw = raw.concat(splitTerms(String(meta.desc || meta.description || '').slice(0, 320).replace(/[。！？!?：:｜|【】()[\]（）—_-]+/g, '，')));
+      var seen = {}, out = [];
+      raw.forEach(function (term) {
+        term = normalizeText(term).replace(/^[,，.。]+|[,，.。]+$/g, '');
+        if (term.length < 2 || term.length > 32) return;
+        var key = term.toLowerCase();
+        if (!seen[key]) { seen[key] = true; out.push(term); }
+      });
+      return out.slice(0, 80);
+    }
+  
+    function overlapLength(left, right) {
+      var max = Math.min(left.length, right.length, 30);
+      for (var n = max; n >= 2; n--) if (left.slice(-n) === right.slice(0, n)) return n;
+      return 0;
+    }
+  
+    function dedupeAdjacentCues(body) {
+      var out = [];
+      (body || []).forEach(function (cue) {
+        var text = normalizeText(cue && cue.content);
+        if (!text) return;
+        var current = { from: Number(cue.from) || 0, to: Number(cue.to) || Number(cue.from) || 0, content: text };
+        if (!out.length) { out.push(current); return; }
+        var prev = out[out.length - 1];
+        if (text === prev.content || prev.content.indexOf(text) >= 0) {
+          prev.to = Math.max(prev.to, current.to);
+          return;
+        }
+        if (text.indexOf(prev.content) === 0 && text.length > prev.content.length) {
+          prev.content = text;
+          prev.to = Math.max(prev.to, current.to);
+          return;
+        }
+        var overlap = overlapLength(prev.content, text);
+        if (overlap) current.content = text.slice(overlap).trim();
+        if (!current.content) { prev.to = Math.max(prev.to, current.to); return; }
+        out.push(current);
+      });
+      return out;
+    }
+  
+    function textLength(text) { return normalizeText(text).replace(/[\s，。！？；：,.!?;:]/g, '').length; }
+    function hasEndPunctuation(text) { return /[。！？!?；;…]$/.test(text); }
+  
+    function addLocalPunctuation(text, gap, final) {
+      text = normalizeText(text);
+      if (!text || /[，。！？；：,.!?;:…]$/.test(text)) return text;
+      if (/(吗|么|呢|是不是|为什么|怎么|怎样|多少|哪里|哪儿|谁|何时|多久)$/i.test(text)) return text + '？';
+      if (final || gap >= 1.4) return text + '。';
+      if (/(啊|呀|吧|哦|啦|嘛|那么|然后|所以|但是|不过)$/i.test(text) || gap >= 0.65) return text + '，';
+      return text;
+    }
+  
+    function polishBody(body, options) {
+      options = options || {};
+      var cues = dedupeAdjacentCues(body);
+      if (options.punctuation === false) return cues;
+      var out = [], current = null;
+  
+      function flushCurrent() {
+        if (!/[。！？!?…]$/.test(current.content)) current.content = current.content.replace(/[，,；;]+$/, '') + '。';
+        out.push(current);
+        current = null;
+      }
+  
+      for (var i = 0; i < cues.length; i++) {
+        var cue = cues[i];
+        var next = cues[i + 1];
+        var gap = next ? Math.max(0, next.from - cue.to) : 2;
+        var content = addLocalPunctuation(cue.content, gap, !next);
+        // 为什么：原先只在追加后检查 40 字上限，一条 5 字碎片会把 35 字的句子顶到 40 字以上
+        // （实测冲出 43 字）。改成追加前预判：当前已够 15 字且追加后越界，就先就地断句，
+        // 保证自然句稳定落在 15–40 字；不足 15 字的短句仍继续攒，避免碎句。
+        if (current && current.content && textLength(current.content) >= 15 &&
+            textLength(current.content) + textLength(content) > 40) {
+          flushCurrent();
+        }
+        if (!current) current = { from: cue.from, to: cue.to, content: '' };
+        if (current.content && !/[，。！？；：,.!?;:…]$/.test(current.content)) current.content += '，';
+        current.content += content;
+        current.to = Math.max(current.to, cue.to);
+        var length = textLength(current.content);
+        var naturalEnd = hasEndPunctuation(content);
+        if ((naturalEnd && length >= 15) || length >= 40 || !next) {
+          flushCurrent();
+        }
+      }
+      return out;
+    }
+  
+    function bodyToAiText(body) {
+      return polishBody(body, { punctuation: true }).map(function (cue) { return cue.content; }).join('\n');
+    }
+  
+    function anchorTime(sec) {
+      sec = Math.max(0, Math.floor(Number(sec) || 0));
+      var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      function p(n) { return String(n).padStart(2, '0'); }
+      return h ? p(h) + ':' + p(m) + ':' + p(s) : p(m) + ':' + p(s);
+    }
+  
+    function bodyToAnchoredText(body, anchorSec) {
+      anchorSec = Math.max(180, Math.min(300, Number(anchorSec) || 240));
+      var polished = polishBody(body, { punctuation: true });
+      var groups = [], current = null;
+      polished.forEach(function (cue) {
+        var bucket = Math.floor((Number(cue.from) || 0) / anchorSec);
+        if (!current || current.bucket !== bucket) {
+          current = { bucket: bucket, from: Number(cue.from) || bucket * anchorSec, parts: [] };
+          groups.push(current);
+        }
+        current.parts.push(cue.content);
+      });
+      return groups.map(function (group) { return '[' + anchorTime(group.from) + ']\n' + group.parts.join(''); }).join('\n\n');
+    }
+  
+    function buildCorrectionPrompt(body, meta, customTerms) {
+      meta = meta || {};
+      var rows = (body || []).map(function (cue, index) { return { index: index, content: normalizeText(cue.content) }; });
+      return [
+        '你是字幕校对器，只能修正错别字、同音字和专有名词。',
+        '严禁改写句式、调整语序、概括、扩写、删减信息或合并拆分条目。',
+        '必须保持 corrected 数组的 index、顺序和条目数完全不变。',
+        '输出严格 JSON：{"corrected":[{"index":0,"content":"..."}],"changes":[{"from":"原词","to":"改词"}]}，无修改时 changes=[]。不要输出 Markdown。',
+        '视频标题：' + normalizeText(meta.title),
+        '简介：' + normalizeText(meta.desc || meta.description).slice(0, 500),
+        '作者/UP主：' + normalizeText(meta.author || meta.up),
+        '分区与标签：' + normalizeText([meta.typename || meta.category, meta.tags].filter(Boolean).join('，')),
+        '自定义术语：' + splitTerms(customTerms).join('，'),
+        '待校对字幕：' + JSON.stringify(rows)
+      ].join('\n');
+    }
+  
+    function parseCorrectionResponse(text, originalBody) {
+      var source = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      var match = source.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('LLM 纠错响应不是 JSON');
+      var data = JSON.parse(match[0]);
+      if (!Array.isArray(data.corrected) || data.corrected.length !== (originalBody || []).length) throw new Error('LLM 纠错返回条目数改变，已拒绝应用');
+      var body = data.corrected.map(function (row, index) {
+        if (Number(row.index) !== index) throw new Error('LLM 纠错返回顺序改变，已拒绝应用');
+        var original = originalBody[index];
+        var content = normalizeText(row.content);
+        if (!content) throw new Error('LLM 纠错产生空字幕，已拒绝应用');
+        return { from: original.from, to: original.to, content: content };
+      });
+      var changes = Array.isArray(data.changes) ? data.changes.map(function (change) {
+        return { from: normalizeText(change.from), to: normalizeText(change.to) };
+      }).filter(function (change) { return change.from && change.to && change.from !== change.to; }) : [];
+      return { body: body, changes: changes };
+    }
+  
+    return {
+      buildHotwords: buildHotwords,
+      dedupeAdjacentCues: dedupeAdjacentCues,
+      polishBody: polishBody,
+      bodyToAiText: bodyToAiText,
+      bodyToAnchoredText: bodyToAnchoredText,
+      buildCorrectionPrompt: buildCorrectionPrompt,
+      parseCorrectionResponse: parseCorrectionResponse
+    };
+  }
+  var TranscriptQuality = createTranscriptQualityModule();
+  // </build:modules>
 
   // ===================== 状态 =====================
   var state = {
@@ -67,7 +751,16 @@
     asrLongMode: GM_getValue('bsr_asr_longmode', 'auto'),
     asrPlayRate: GM_getValue('bsr_asr_playrate', 4),
     translateTo: GM_getValue('bsr_translate_to', 'none'),
-    translateModel: GM_getValue('bsr_translate_model', 'Qwen/Qwen2.5-72B-Instruct')
+    translateModel: GM_getValue('bsr_translate_model', 'Qwen/Qwen2.5-72B-Instruct'),
+    // v9.2 转写质量三层提升：①热词注入（免费）②标点恢复+断句+相邻去重（免费）③LLM 轻量纠错（付费·默认关）
+    hotwordsOn: GM_getValue('bsr_hotwords_on', true),
+    polishOn: GM_getValue('bsr_polish_on', true),
+    llmCorrect: GM_getValue('bsr_llm_correct', false),
+    // v9.2 搜索筛选 Tab：YouTube Data API Key + 候选评分权重（JSON，空=用模块默认）
+    ytKey: GM_getValue('bsr_yt_key', ''),
+    scoreWeights: GM_getValue('bsr_score_weights', ''),
+    searchPlatform: GM_getValue('bsr_search_platform', 'bilibili'),
+    customHotwords: GM_getValue('bsr_custom_hotwords', '')
   };
   function saveSettings() {
     try {
@@ -82,6 +775,13 @@
       GM_setValue('bsr_asr_playrate', SETTINGS.asrPlayRate);
       GM_setValue('bsr_translate_to', SETTINGS.translateTo);
       GM_setValue('bsr_translate_model', SETTINGS.translateModel);
+      GM_setValue('bsr_hotwords_on', SETTINGS.hotwordsOn);
+      GM_setValue('bsr_polish_on', SETTINGS.polishOn);
+      GM_setValue('bsr_llm_correct', SETTINGS.llmCorrect);
+      GM_setValue('bsr_yt_key', SETTINGS.ytKey);
+      GM_setValue('bsr_score_weights', SETTINGS.scoreWeights);
+      GM_setValue('bsr_search_platform', SETTINGS.searchPlatform);
+      GM_setValue('bsr_custom_hotwords', SETTINGS.customHotwords);
     } catch (e) { log('设置保存失败', e); }
   }
 
@@ -873,12 +1573,24 @@
   }
 
   // ===================== AI 语音转写（硅基流动 SenseVoice） =====================
+  // v9.2 热词注入：词全部来自视频自身元数据（标题/UP主/分区/标签/简介）+ 用户自定义，
+  // 不联网搜索（答案就在视频自己的元数据里，见 transcript-quality 模块注释）。
+  // 降级策略：老账号/区域不支持 hotwords 参数时接口会 4xx，此时去掉参数重试一次，
+  // 并把开关关掉避免每片都撞一次——转写绝不能因为一个增强参数而挂掉。
+  var hotwordsFallbackDone = false;
+  function currentHotwords() {
+    if (!SETTINGS.hotwordsOn || hotwordsFallbackDone) return [];
+    var meta = { title: state.title, author: state.up, desc: state.desc, category: state.category, tags: state.tags };
+    try { return TranscriptQuality.buildHotwords(meta, SETTINGS.customHotwords || ''); } catch (e) { return []; }
+  }
   function sfTranscribe(blob, fileName) {
     return new Promise(function (resolve, reject) {
       var fd = new FormData();
       fd.append('model', SETTINGS.asrModel);
       fd.append('file', blob, fileName || 'chunk.wav');
       if (SETTINGS.asrLang && SETTINGS.asrLang !== 'auto') fd.append('language', SETTINGS.asrLang);
+      var hotwords = currentHotwords();
+      if (hotwords.length) fd.append('hotwords', JSON.stringify(hotwords));
       fd.append('response_format', 'srt');
       GM_xmlhttpRequest({
         method: 'POST',
@@ -887,8 +1599,18 @@
         data: fd,
         timeout: 300000,
         onload: function (r) {
-          if (r.status >= 200 && r.status < 300) resolve(r.responseText);
-          else reject(new Error('ASR HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 160)));
+          if (r.status >= 200 && r.status < 300) { resolve(r.responseText); return; }
+          // 带热词被拒（4xx 且错误体提到热词/参数）→ 脱裤重试一次
+          if (hotwords.length && r.status >= 400 && r.status < 500 &&
+              /hotword|热词|parameter|param|unsupported|invalid/i.test(String(r.responseText || ''))) {
+            hotwordsFallbackDone = true;
+            SETTINGS.hotwordsOn = false; saveSettings();
+            log('热词参数不被支持，已自动降级并关闭热词开关');
+            toast('当前账号不支持热词参数，已自动关闭（转写继续）');
+            sfTranscribe(blob, fileName).then(resolve, reject);
+            return;
+          }
+          reject(new Error('ASR HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 160)));
         },
         onerror: function () { reject(new Error('ASR 网络错误')); },
         ontimeout: function () { reject(new Error('ASR 请求超时')); }
@@ -1091,6 +1813,7 @@
         if (body.length && myGen === asrGen) {
           var mCancel = mergeBodies([{ body: body }]);
           mCancel.incomplete = true;
+          mCancel = maybePolish(mCancel);
           state.body = mCancel;
           state.lan = 'ASR·取消';
           cache[ck] = mCancel;
@@ -1104,6 +1827,8 @@
       render();
       var merged = mergeBodies([{ body: body }]);
       merged.incomplete = !!(body && body.incomplete);   // 录制中途收尾时如实标记，界面会提示「字幕可能不完整」
+      // ASR 输出是重灾区：滚动自动字幕每条都带上一句尾巴 + 通篇无标点，落定前必须过去重补标点
+      merged = maybePolish(merged);
       state.body = merged;
       state.lan = 'ASR·' + (SETTINGS.asrLang === 'auto' ? '自动' : (LANG_NAMES[SETTINGS.asrLang] || SETTINGS.asrLang));
       cache[ck] = merged;
@@ -1732,6 +2457,135 @@
     return out.length ? out : null;
   }
 
+  // ===================== v9.2 转写质量增强（transcript-quality 模块接线） =====================
+  // 幂等：同一份 body 只处理一次（__polished 标记），render() 反复调用不会二次断句。
+  // 免费三层里的第二层「事后增强」：标点恢复 + 碎句合并成自然段 + 相邻重复行去除
+  // （B站滚动自动字幕每条 cue 都带上一句尾巴，不去重会满篇重复）。
+  function maybePolish(body) {
+    if (!SETTINGS.polishOn || !body || !body.length || body.__polished) return body;
+    try {
+      var polished = TranscriptQuality.polishBody(body);
+      if (polished && polished.length) {
+        polished.incomplete = body.incomplete;   // 保留完整性标记，别被增强冲掉
+        polished.__polished = true;
+        return polished;
+      }
+    } catch (e) { log('字幕增强失败，保留原文', e); }
+    body.__polished = true;   // 失败也要打标：避免每次渲染都重试烧 CPU
+    return body;
+  }
+
+  // v9.2 第三层（付费·默认关）：LLM 轻量纠错。只改错别字/同音字/专有名词，
+  // 严禁改句式——parseCorrectionResponse 会用条目数与顺序做硬校验，LLM 想夹带私货
+  // （概括/删减/改序）直接整批拒绝。热词已把视频自身元数据喂给它当参照。
+  async function runLlmCorrect() {
+    if (!state.body || !state.body.length) { toast('请先获取字幕'); return; }
+    if (!SETTINGS.sfKey) { toast('LLM 纠错需要硅基流动 API Key（⚙ 设置）'); return; }
+    var myGen = asrGen;
+    state.loading = true; state.err = '';
+    state.asr = { phase: 'LLM 纠错', stage: 'transcribe', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null, t0: Date.now() };
+    render();
+    try {
+      var meta = { title: state.title, author: state.up, desc: state.desc, category: state.category, tags: state.tags };
+      var BATCH = 120, out = [], changeCount = 0;
+      for (var i = 0; i < state.body.length; i += BATCH) {
+        if (asrStop(myGen)) break;
+        var batch = state.body.slice(i, i + BATCH);
+        var prompt = TranscriptQuality.buildCorrectionPrompt(batch, meta, SETTINGS.customHotwords || '');
+        var resp = await sfChat(prompt);
+        var result = TranscriptQuality.parseCorrectionResponse(resp, batch);   // 条目数/顺序不符会 throw，整批拒绝
+        out = out.concat(result.body);
+        changeCount += (result.changes || []).length;
+        state.asr.done = Math.floor(i / BATCH) + 1;
+        render();
+      }
+      if (asrStop(myGen)) { state.asr = null; state.loading = false; render(); return; }
+      if (!out.length) throw new Error('纠错结果为空');
+      out.__polished = true;
+      out.incomplete = state.body.incomplete;
+      state.body = out;
+      state.lan = (state.lan || '字幕') + ' · 已纠错';
+      state.asr = null; state.loading = false; render();
+      toast('纠错完成：' + out.length + ' 句，修正 ' + changeCount + ' 处（只改错字，未改句式）');
+      notifyDone('字幕纠错完成', (state.title || '视频') + ' · 修正 ' + changeCount + ' 处');
+    } catch (e) {
+      log(e);
+      if (asrStop(myGen)) { state.asr = null; state.loading = false; render(); return; }
+      state.err = 'LLM 纠错失败：' + e.message + '（已保留原字幕，未做任何改动）';
+      state.asr = null; state.loading = false; render();
+    }
+  }
+
+  // ===================== v9.2 双形态导出 =====================
+  // 「AI 纯文本」：剥掉时间戳——给 AI 总结用（时间戳对模型是噪音，且会漂移 ±20 秒）；
+  // 「章节锚点稿」：保留章节级时间锚点——给人阅读/跳转用（精确到句的时间轴没人看）。
+  function exportAiText() {
+    if (!state.body) { toast('请先获取字幕'); return; }
+    var text = TranscriptQuality.bodyToAiText(state.body);
+    copyText(text);
+    download(safeName(state.title) + '_AI纯文本.txt', '\uFEFF' + text);
+  }
+  function exportAnchored() {
+    if (!state.body) { toast('请先获取字幕'); return; }
+    var text = TranscriptQuality.bodyToAnchoredText(state.body, { gapSec: 300 });
+    copyText(text);
+    download(safeName(state.title) + '_章节锚点稿.txt', '\uFEFF' + text);
+  }
+
+  // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
+  var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1 };
+  function activeScoreWeights() {
+    if (!SETTINGS.scoreWeights) return CandidateScorer.DEFAULT_WEIGHTS;
+    try {
+      var parsed = JSON.parse(SETTINGS.scoreWeights);
+      return CandidateScorer.normalizeWeights(parsed);
+    } catch (e) { return CandidateScorer.DEFAULT_WEIGHTS; }
+  }
+  function fmtCount(n) {
+    n = Number(n) || 0;
+    if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + ' 亿';
+    if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, '') + ' 万';
+    return String(n);
+  }
+  function fmtDurSec(s) {
+    s = Math.round(Number(s) || 0);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
+  }
+  async function runSearch() {
+    var keyword = (search.keyword || '').trim();
+    if (!keyword) { toast('请输入搜索关键词'); return; }
+    if (search.loading) return;
+    search.loading = true; search.err = ''; search.expanded = -1;
+    render();
+    var deps = { gx: gx, getWbiKeys: getWbiKeys, wbiQuery: wbiQuery, sleep: sleep, random: Math.random };
+    try {
+      var items;
+      if (search.platform === 'youtube') {
+        if (!SETTINGS.ytKey) throw new Error('YouTube 搜索需要 Data API Key（⚙ 设置里填）');
+        items = await SearchFilter.searchYouTube(keyword, { apiKey: SETTINGS.ytKey, order: 'relevance', maxResults: 20 }, { gx: gx });
+      } else {
+        items = await SearchFilter.searchBilibili(keyword, { order: search.order, maxResults: 20 }, deps);
+      }
+      var weights = activeScoreWeights();
+      items.forEach(function (item) { item.score = CandidateScorer.scoreCandidate(item, weights); });
+      var filtered = SearchFilter.filterCandidates(items, { minPlay: search.minPlay, nativeOnly: search.nativeOnly });
+      filtered.sort(function (a, b) { return (b.score ? b.score.total : 0) - (a.score ? a.score.total : 0); });
+      search.items = filtered;
+      if (!filtered.length) search.err = '没有符合筛选条件的视频（可降低播放量门槛或关闭「仅有字幕」）';
+    } catch (e) {
+      log(e);
+      search.err = '搜索失败：' + e.message;
+    }
+    search.loading = false;
+    render();
+  }
+  function openCandidate(item) {
+    if (!item) return;
+    var url = item.url || (item.platform === 'youtube' ? 'https://www.youtube.com/watch?v=' + item.videoId : '');
+    if (url) window.open(url, '_blank', 'noopener');
+  }
+
   // ===================== 字幕正文获取（含站点差异） =====================
   async function fetchBody(lan) {
     var key = (state.cid || state.videoId || state.bvid || state.aid || state.title) + '_' + lan;
@@ -1754,6 +2608,7 @@
     }
     if (!merged || !merged.length) throw new Error('字幕内容为空');
     merged.incomplete = checkIntegrity(merged, state.duration);
+    merged = maybePolish(merged);
     state.body = merged; state.lan = lan;
     cache[key] = merged;
     return merged;
@@ -1915,6 +2770,29 @@
       '.bsr-credit{text-align:center;font-size:10px;color:#aaa;padding:6px 0 2px;border-top:1px solid #f5f5f5;background:#fff}' +
       '.bsr-credit a{color:#7C5CBF;text-decoration:none;font-weight:600}' +
       '.bsr-credit a:hover{text-decoration:underline}' +
+      '.bsr-tabs{display:flex;border-bottom:1px solid #f2f2f2;background:#fff}' +
+      '.bsr-tab{flex:1;text-align:center;padding:9px 4px;font-size:12px;font-weight:600;color:#999;cursor:pointer;border-bottom:2px solid transparent;user-select:none}' +
+      '.bsr-tab.on{color:#FB7299;border-bottom-color:#FB7299}' +
+      '.bsr-pane{display:none}.bsr-pane.show{display:block}' +
+      '.bsr-input{width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #eee;border-radius:8px;font-size:12px;font-family:inherit}' +
+      '.bsr-searchbar{display:flex;gap:6px;margin-bottom:8px}' +
+      '.bsr-searchbar .bsr-input{margin-bottom:0}' +
+      '.bsr-res{border:1px solid #f0f0f0;border-radius:10px;padding:9px 10px;margin-bottom:8px;cursor:pointer;transition:.15s}' +
+      '.bsr-res:hover{border-color:#FB7299;background:#fff8fa}' +
+      '.bsr-res-t{font-size:12px;font-weight:600;color:#222;line-height:1.5;display:flex;gap:6px;align-items:flex-start}' +
+      '.bsr-res-t span{flex:1}' +
+      '.bsr-res-m{font-size:10px;color:#999;margin-top:4px;line-height:1.6}' +
+      '.bsr-res-r{font-size:10px;color:#777;margin-top:5px;line-height:1.7;background:#fafafa;border-radius:6px;padding:5px 8px}' +
+      '.bsr-res-r li{margin-left:14px}' +
+      '.bsr-tier{flex:none;font-size:10px;font-weight:700;border-radius:5px;padding:1px 6px;color:#fff}' +
+      '.bsr-tier.A{background:#4ecca3}.bsr-tier.B{background:#3a8ee6}.bsr-tier.C{background:#bbb}' +
+      '.bsr-sub{display:inline-block;font-size:10px;border-radius:4px;padding:0 4px}' +
+      '.bsr-sub.yes{background:#e6f9f1;color:#0a8f5f}.bsr-sub.no{background:#fdeeee;color:#c05050}' +
+      '.bsr-empty{font-size:11px;color:#aaa;text-align:center;padding:18px 0;line-height:1.7}' +
+      '.bsr-wbox{display:none;border:1px dashed #ddd;border-radius:8px;padding:8px;margin-top:8px}' +
+      '.bsr-wbox.show{display:block}' +
+      '.bsr-wbox textarea{width:100%;box-sizing:border-box;height:88px;font-size:10px;font-family:monospace;border:1px solid #eee;border-radius:6px;padding:6px}' +
+      '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-keywrap{position:relative}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-save{width:100%;margin-top:10px;background:#7C5CBF}' +
@@ -1924,7 +2802,12 @@
       '<button id="bsr-fab" title="字幕提取">🎬</button>' +
       '<div id="bsr-panel">' +
       '  <div class="bsr-h">📝 字幕提取 <span class="x" id="bsrClose">✕</span></div>' +
+      '  <div class="bsr-tabs">' +
+      '    <div class="bsr-tab on" data-tab="sub">📝 字幕提取</div>' +
+      '    <div class="bsr-tab" data-tab="search">🔍 搜索筛选</div>' +
+      '  </div>' +
       '  <div class="bsr-b">' +
+      '    <div class="bsr-pane show" id="bsrPaneSub">' +
       '    <div class="bsr-title" id="bsrTitle">—</div>' +
       '    <button class="bsr-btn bsr-get" id="bsrGet">⚡ 获取字幕</button>' +
       '    <div class="bsr-row" id="bsrLanRow" style="display:none">' +
@@ -1951,9 +2834,53 @@
       '      <button class="bsr-btn bsr-c" id="bsrCopy">📋 复制</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrTxt">⬇ TXT</button>' +
       '      <button class="bsr-btn bsr-s" id="bsrSrt">⬇ SRT</button>' +
+      '      <button class="bsr-btn bsr-t" id="bsrAiTxt" title="剥掉时间戳的纯文本，喂给 AI 做总结最省 token">🤖 AI 文本</button>' +
+      '      <button class="bsr-btn bsr-t" id="bsrAnchor" title="带章节级时间锚点，适合人读与跳转">⏱ 锚点稿</button>' +
+      '      <button class="bsr-btn bsr-cancel" id="bsrCorrect" style="display:none" title="用 chat 模型只改错别字/同音字/专有名词，不改句式">✨ AI 纠错</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrAsrBtn" style="display:none">🎙 AI 转写</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrUnlock" style="display:none">▶ 解锁播放并继续（浏览器自动播放限制）</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCancel" style="display:none">✖ 取消</button>' +
+      '    </div>' +
+      '    </div>' +
+      '    <div class="bsr-pane" id="bsrPaneSearch">' +
+      '      <div class="bsr-row">' +
+      '        <select class="bsr-sel" id="bsrSearchPlatform" style="max-width:96px">' +
+      '          <option value="bilibili">B站</option>' +
+      '          <option value="youtube">YouTube</option>' +
+      '        </select>' +
+      '        <select class="bsr-sel" id="bsrSearchOrder" style="max-width:110px">' +
+      '          <option value="totalrank">综合排序</option>' +
+      '          <option value="click">最多播放</option>' +
+      '          <option value="pubdate">最新发布</option>' +
+      '          <option value="stow">最多收藏</option>' +
+      '        </select>' +
+      '      </div>' +
+      '      <div class="bsr-searchbar">' +
+      '        <input class="bsr-input" id="bsrSearchKw" placeholder="搜视频，如「注意力机制 科普」" />' +
+      '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">搜索</button>' +
+      '      </div>' +
+      '      <div class="bsr-row" style="font-size:11px;color:#888;margin-bottom:4px">' +
+      '        <label style="display:flex;align-items:center;gap:5px;margin:0;cursor:pointer"><input type="checkbox" id="bsrSearchNative" style="width:auto" /> 仅有字幕</label>' +
+      '        <label style="display:flex;align-items:center;gap:5px;margin:0 0 0 auto;cursor:pointer">最低播放' +
+      '          <select id="bsrSearchMinPlay" style="border:1px solid #eee;border-radius:6px;font-size:11px;padding:2px 4px">' +
+      '            <option value="0">不限</option>' +
+      '            <option value="10000">1 万</option>' +
+      '            <option value="100000">10 万</option>' +
+      '            <option value="1000000">100 万</option>' +
+      '          </select>' +
+      '        </label>' +
+      '      </div>' +
+      '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
+      '      <div id="bsrSearchResults"></div>' +
+      '      <div class="bsr-set" id="bsrWeightToggle">⚖ 评分权重（A/B/C 档怎么算）</div>' +
+      '      <div class="bsr-wbox" id="bsrWeightBox">' +
+      '        <div style="font-size:10px;color:#888;line-height:1.6;margin-bottom:6px">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。有原生字幕 +42 / 无字幕 −38（ASR 要花钱还慢）；时长 5–40 分钟 +14；知识类分区 +16。JSON 可直接编辑，留空 = 恢复默认。</div>' +
+      '        <textarea id="bsrWeights" spellcheck="false"></textarea>' +
+      '        <div class="bsr-row" style="margin-top:6px">' +
+      '          <button class="bsr-btn bsr-s" id="bsrWeightSave" style="flex:1">保存权重</button>' +
+      '          <button class="bsr-btn bsr-cancel" id="bsrWeightReset" style="flex:1">恢复默认</button>' +
+      '        </div>' +
+      '      </div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）</div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
@@ -2027,6 +2954,16 @@
       '        <option value="Qwen/Qwen2.5-7B-Instruct">Qwen2.5-7B（快省）</option>' +
       '        <option value="deepseek-ai/DeepSeek-V3">DeepSeek-V3</option>' +
       '      </select>' +
+      '      <label class="chk"><input type="checkbox" id="bsrPolishOn" /> 字幕增强：补标点 + 合并碎句 + 去重复行（免费·推荐）</label>' +
+      '      <label class="chk"><input type="checkbox" id="bsrHotwordsOn" /> ASR 热词注入：拿视频标题/标签提升专名识别（免费）</label>' +
+      '      <label>自定义热词（逗号分隔，叠加在自动热词上，如：蓝桥杯,STM32,寄存器）</label>' +
+      '      <input type="text" id="bsrCustomHotwords" placeholder="留空则只用视频自身元数据" autocomplete="off" />' +
+      '      <label class="chk"><input type="checkbox" id="bsrLlmCorrect" /> LLM 轻量纠错（付费：纠错按钮只改错字不改句式）</label>' +
+      '      <label>YouTube Data API Key（搜索筛选 Tab 搜 YouTube 用，可选）</label>' +
+      '      <div class="bsr-keywrap">' +
+      '        <input type="password" id="bsrYtKey" placeholder="AIza..." autocomplete="off" />' +
+      '        <span class="eye" id="bsrYtEye">👁</span>' +
+      '      </div>' +
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
@@ -2079,8 +3016,62 @@
       SETTINGS.asrPlayRate = parseInt(root.querySelector('#bsrPlayRate').value, 10) || 4;
       SETTINGS.translateTo = root.querySelector('#bsrTrans').value;
       SETTINGS.translateModel = root.querySelector('#bsrTModel').value;
+      SETTINGS.polishOn = root.querySelector('#bsrPolishOn').checked;
+      SETTINGS.hotwordsOn = root.querySelector('#bsrHotwordsOn').checked;
+      SETTINGS.llmCorrect = root.querySelector('#bsrLlmCorrect').checked;
+      SETTINGS.customHotwords = root.querySelector('#bsrCustomHotwords').value.trim();
+      SETTINGS.ytKey = root.querySelector('#bsrYtKey').value.trim();
       saveSettings();
       toast('设置已保存');
+      render();
+    };
+    // ---- v9.2 Tab 切换 ----
+    function switchTab(name) {
+      Array.prototype.forEach.call(root.querySelectorAll('.bsr-tab'), function (t) {
+        t.classList.toggle('on', t.getAttribute('data-tab') === name);
+      });
+      root.querySelector('#bsrPaneSub').classList.toggle('show', name === 'sub');
+      root.querySelector('#bsrPaneSearch').classList.toggle('show', name === 'search');
+    }
+    Array.prototype.forEach.call(root.querySelectorAll('.bsr-tab'), function (t) {
+      t.onclick = function () { switchTab(t.getAttribute('data-tab')); };
+    });
+    // ---- v9.2 搜索筛选 ----
+    root.querySelector('#bsrSearchPlatform').onchange = function (e) { search.platform = e.target.value; SETTINGS.searchPlatform = search.platform; saveSettings(); };
+    root.querySelector('#bsrSearchOrder').onchange = function (e) { search.order = e.target.value; };
+    root.querySelector('#bsrSearchNative').onchange = function (e) { search.nativeOnly = e.target.checked; };
+    root.querySelector('#bsrSearchMinPlay').onchange = function (e) { search.minPlay = Number(e.target.value) || 0; };
+    root.querySelector('#bsrSearchKw').onkeydown = function (e) { if (e.key === 'Enter') runSearch(); };
+    root.querySelector('#bsrSearchBtn').onclick = function () { search.keyword = root.querySelector('#bsrSearchKw').value; runSearch(); };
+    root.querySelector('#bsrWeightToggle').onclick = function () { root.querySelector('#bsrWeightBox').classList.toggle('show'); };
+    root.querySelector('#bsrWeightSave').onclick = function () {
+      var raw = root.querySelector('#bsrWeights').value.trim();
+      if (!raw) { SETTINGS.scoreWeights = ''; saveSettings(); toast('已恢复默认权重'); return; }
+      try {
+        var parsed = JSON.parse(raw);
+        CandidateScorer.normalizeWeights(parsed);   // 校验：非法权重直接抛，不进设置
+        SETTINGS.scoreWeights = raw; saveSettings();
+        toast('权重已保存，下次搜索生效');
+      } catch (e) { toast('权重 JSON 无效：' + e.message); }
+    };
+    root.querySelector('#bsrWeightReset').onclick = function () {
+      SETTINGS.scoreWeights = ''; saveSettings();
+      root.querySelector('#bsrWeights').value = JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
+      toast('已恢复默认权重');
+    };
+    // ---- v9.2 双形态导出 + LLM 纠错 ----
+    root.querySelector('#bsrAiTxt').onclick = exportAiText;
+    root.querySelector('#bsrAnchor').onclick = exportAnchored;
+    root.querySelector('#bsrCorrect').onclick = runLlmCorrect;
+    // 结果卡片：第一次点展开评分理由，第二次点打开视频（理由是为了「先看为什么再决定」）
+    root.querySelector('#bsrSearchResults').onclick = function (e) {
+      var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
+      if (!card) return;
+      var i = Number(card.getAttribute('data-i'));
+      var item = search.items[i];
+      if (!item) return;
+      if (search.expanded === i) openCandidate(item);
+      else { search.expanded = i; render(); }
     };
     // 回填设置
     root.querySelector('#bsrKey').value = SETTINGS.sfKey;
@@ -2094,6 +3085,20 @@
     root.querySelector('#bsrPlayRate').value = String(SETTINGS.asrPlayRate);
     root.querySelector('#bsrTrans').value = SETTINGS.translateTo;
     root.querySelector('#bsrTModel').value = SETTINGS.translateModel;
+    root.querySelector('#bsrPolishOn').checked = SETTINGS.polishOn;
+    root.querySelector('#bsrHotwordsOn').checked = SETTINGS.hotwordsOn;
+    root.querySelector('#bsrLlmCorrect').checked = SETTINGS.llmCorrect;
+    root.querySelector('#bsrCustomHotwords').value = SETTINGS.customHotwords;
+    root.querySelector('#bsrYtKey').value = SETTINGS.ytKey;
+    root.querySelector('#bsrSearchPlatform').value = SETTINGS.searchPlatform;
+    root.querySelector('#bsrSearchOrder').value = search.order;
+    root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
+    root.querySelector('#bsrSearchMinPlay').value = String(search.minPlay);
+    root.querySelector('#bsrWeights').value = SETTINGS.scoreWeights || JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
+    root.querySelector('#bsrYtEye').onclick = function () {
+      var k = root.querySelector('#bsrYtKey');
+      k.type = (k.type === 'password') ? 'text' : 'password';
+    };
   }
 
   function render() {
@@ -2220,6 +3225,40 @@
     $('#bsrAsrBtn').style.display = (state.noSub || (!state.subs.length && !state.loading && !state.body)) ? 'inline-block' : 'none';
     // 播放录制被自动播放策略拦截时显示「解锁」按钮
     $('#bsrUnlock').style.display = (state.asr && state.asr.unlock) ? 'inline-block' : 'none';
+    // v9.2 LLM 纠错按钮：付费功能，仅在设置开启 + 有 Key + 有字幕时出现，不打扰默认用户
+    $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.sfKey && state.body && !state.loading) ? 'inline-block' : 'none';
+    // v9.2 搜索面板渲染。签名缓存：只有搜索状态真变了才重写列表，
+    // 否则用户点开「评分理由」时每帧 render 都会重建 DOM，展开状态当场丢失。
+    var sst = $('#bsrSearchStatus');
+    if (search.loading) sst.textContent = '⏳ 搜索中（B站需逐个探测字幕，稍候）...';
+    else if (search.err) sst.textContent = '⚠️ ' + search.err;
+    else if (search.items.length) sst.textContent = '✅ ' + search.items.length + ' 个结果 · 按评分排序 · 点卡片看评分理由，再点打开视频';
+    else sst.textContent = '';
+    var sig = search.loading + '|' + search.err + '|' + search.items.length + '|' + search.expanded + '|' + SETTINGS.scoreWeights;
+    if (sig !== render._searchSig) {
+      render._searchSig = sig;
+      var sbox = $('#bsrSearchResults');
+      if (!search.items.length && !search.loading) {
+        sbox.innerHTML = '<div class="bsr-empty">输入关键词搜视频<br/>自动探测有没有字幕、算出 A/B/C 档「值不值得转写」<br/>B站免 Key · YouTube 需 Data API Key（⚙ 设置）</div>';
+      } else {
+        sbox.innerHTML = search.items.map(function (item, i) {
+          var sc = item.score || { total: 0, tier: 'C', reasons: [] };
+          var subBadge = item.hasNativeSubtitle === true ? '<span class="bsr-sub yes">有字幕</span>'
+            : (item.hasNativeSubtitle === false ? '<span class="bsr-sub no">无字幕·需转写</span>' : '');
+          var meta = (item.platform === 'youtube' ? 'YouTube' : 'B站') + ' · ' + fmtDurSec(item.durationSec) + ' · ' + fmtCount(item.play) + ' 播放' + (item.pubdate ? ' · ' + item.pubdate : '');
+          var reasons = (i === search.expanded && sc.reasons && sc.reasons.length)
+            ? '<ul class="bsr-res-r">' + sc.reasons.map(function (r) {
+                return '<li>' + (r.weight > 0 ? '+' : '') + r.weight + ' ' + String(r.detail).replace(/</g, '&lt;') + '</li>';
+              }).join('') + '</ul>'
+            : '';
+          return '<div class="bsr-res" data-i="' + i + '">' +
+            '<div class="bsr-res-t"><span>' + String(item.title || '').replace(/</g, '&lt;') + '</span>' +
+            '<span class="bsr-tier ' + sc.tier + '">' + sc.tier + ' · ' + sc.total + '</span></div>' +
+            '<div class="bsr-res-m">' + subBadge + meta + ' · ' + String(item.author || '').replace(/</g, '&lt;') + '</div>' +
+            reasons + '</div>';
+        }).join('');
+      }
+    }
   }
 
   async function switchLan(lan) {

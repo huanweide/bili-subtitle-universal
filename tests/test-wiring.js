@@ -1,0 +1,104 @@
+/**
+ * 接线验证测试：防止「模块写了但没接进 UI」再次发生。
+ *
+ * 事故背景（2026-10-17）：v9.1 的三个模块（candidate-scorer / search-filter /
+ * transcript-quality）在主脚本里只有定义和实例化，零调用方——功能写了，
+ * 用户摸不到，@description 却在宣传。本测试把「接线」变成可断言的现实。
+ *
+ * 判定方法：静态读取 bili-subtitle.user.js 源码，要求每个对外函数
+ * ① 在模块 return 里导出 ② 在主脚本里有定义之外的调用点。
+ */
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const SRC = fs.readFileSync(path.join(__dirname, '..', 'bili-subtitle.user.js'), 'utf8');
+const BUILD = fs.readFileSync(path.join(__dirname, '..', 'build.js'), 'utf8');
+
+let pass = 0, fail = 0;
+function check(name, cond, detail) {
+  if (cond) { pass++; console.log('[PASS] ' + name); }
+  else { fail++; console.log('[FAIL] ' + name + (detail ? ' —— ' + detail : '')); }
+}
+
+// 统计一个标识符在源码中的出现次数
+function countOf(id, src) {
+  const re = new RegExp('\\b' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g');
+  return ((src || SRC).match(re) || []).length;
+}
+
+// 模块源码（定义侧）：从 build.js 的清单反查文件
+function moduleSource(file) {
+  return fs.readFileSync(path.join(__dirname, '..', 'modules', file), 'utf8');
+}
+const MODULE_FILES = {
+  CandidateScorer: 'candidate-scorer.js',
+  SearchFilter: 'search-filter.js',
+  TranscriptQuality: 'transcript-quality.js'
+};
+
+// 1. 三个模块都被实例化
+check('CandidateScorer 已实例化', /var CandidateScorer = createCandidateScorerModule\(\);/.test(SRC));
+check('SearchFilter 已实例化', /var SearchFilter = createSearchFilterModule\(\);/.test(SRC));
+check('TranscriptQuality 已实例化', /var TranscriptQuality = createTranscriptQualityModule\(\);/.test(SRC));
+
+// 2. 接线判定（修正版）：函数在模块文件里有定义（导出）+ 在主脚本里有
+//    「实例名.函数名」调用。定义与调用分居两地，不能再用总次数一刀切。
+const WIRING = [
+  ['CandidateScorer', 'scoreCandidate', '评分函数有调用方'],
+  ['CandidateScorer', 'normalizeWeights', '权重归一化有调用方'],
+  ['SearchFilter', 'searchBilibili', 'B站搜索有调用方'],
+  ['SearchFilter', 'searchYouTube', 'YouTube 搜索有调用方'],
+  ['SearchFilter', 'filterCandidates', '结果过滤有调用方'],
+  ['TranscriptQuality', 'polishBody', '字幕增强有调用方'],
+  ['TranscriptQuality', 'bodyToAiText', 'AI 纯文本导出有调用方'],
+  ['TranscriptQuality', 'bodyToAnchoredText', '章节锚点导出有调用方'],
+  ['TranscriptQuality', 'buildHotwords', '热词构建有调用方'],
+  ['TranscriptQuality', 'buildCorrectionPrompt', 'LLM 纠错提示词有调用方'],
+  ['TranscriptQuality', 'parseCorrectionResponse', 'LLM 纠错响应校验有调用方']
+];
+WIRING.forEach(function (entry) {
+  const mod = entry[0], fn = entry[1];
+  const defined = new RegExp('function ' + fn + '\\b').test(moduleSource(MODULE_FILES[mod]))
+    && new RegExp(fn + '\\s*:').test(moduleSource(MODULE_FILES[mod]));   // 导出清单里也有
+  const called = countOf(mod + '.' + fn) >= 1;
+  check(entry[2] + '（' + mod + '.' + fn + '）', defined && called,
+    '定义=' + defined + ' 调用次数=' + countOf(mod + '.' + fn));
+});
+
+// 3. 新增 UI 元素 id：HTML 里定义一次 + JS 里 querySelector 至少一次
+const UI_IDS = ['bsrPaneSub', 'bsrPaneSearch', 'bsrSearchBtn', 'bsrSearchKw', 'bsrSearchResults',
+  'bsrSearchStatus', 'bsrSearchPlatform', 'bsrSearchOrder', 'bsrSearchNative', 'bsrSearchMinPlay',
+  'bsrWeightBox', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
+  'bsrAiTxt', 'bsrAnchor', 'bsrCorrect', 'bsrPolishOn', 'bsrHotwordsOn', 'bsrLlmCorrect',
+  'bsrCustomHotwords', 'bsrYtKey', 'bsrYtEye'];
+UI_IDS.forEach(function (id) {
+  const inHtml = new RegExp('id="' + id + '"').test(SRC);
+  // render() 里有 $ = querySelector 简写，两种形式都认
+  const inJs = new RegExp("querySelector\\('#" + id + "'\\)").test(SRC)
+    || new RegExp("\\$\\('#" + id + "'\\)").test(SRC);
+  check('UI 元素 ' + id + ' 两侧都在', inHtml && inJs, 'HTML=' + inHtml + ' JS=' + inJs);
+});
+
+// 4. 新设置项有持久化（SETTINGS 定义 + GM_setValue）
+const SETTING_KEYS = ['polishOn', 'hotwordsOn', 'llmCorrect', 'ytKey', 'scoreWeights', 'customHotwords'];
+SETTING_KEYS.forEach(function (key) {
+  check('设置项 SETTINGS.' + key + ' 已定义', new RegExp(key + ':').test(SRC));
+  check('设置项 bsr_' + key.replace(/[A-Z]/g, function (m) { return '_' + m.toLowerCase(); }) + ' 已持久化',
+    new RegExp("GM_setValue\\('bsr_" + key.replace(/[A-Z]/g, function (m) { return '_' + m.toLowerCase(); }) + "'").test(SRC));
+});
+
+// 5. 版本号与 CHANGELOG 对齐
+const version = (SRC.match(/@version\s+([\d.]+)/) || [])[1];
+const changelog = fs.existsSync(path.join(__dirname, '..', 'CHANGELOG.md'))
+  ? fs.readFileSync(path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8') : '';
+check('@version 已读到', !!version, '没找到 @version');
+check('CHANGELOG 含当前版本 ' + version, version && changelog.indexOf(version) >= 0, 'CHANGELOG 里找不到 ' + version);
+
+// 6. 热词降级逻辑在位（不支持 hotwords 的账号不能把转写搞挂）
+check('热词不支持时自动降级', /hotwordsFallbackDone/.test(SRC) && /已自动降级并关闭热词开关/.test(SRC));
+
+console.log('----------------------------------------');
+console.log(fail === 0 ? 'PASS ' + pass + '/' + (pass + fail) : 'FAIL ' + fail + ' 项（共 ' + (pass + fail) + '）');
+process.exit(fail === 0 ? 0 : 1);

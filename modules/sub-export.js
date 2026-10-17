@@ -138,6 +138,59 @@ function createSubExportModule() {
     return out.join('\n');
   }
 
+  /**
+   * 整体平移时间轴（v9.11）。
+   *
+   * 场景：AI 转写出来的时间轴整体早/晚几秒（识别服务按片计算，片头片尾会累积误差），
+   * 或者字幕是给另一个版本的视频配的。用户要的是「整体挪 N 秒」，不是逐条改。
+   */
+  function shiftBody(body, offsetSec) {
+    var arr = Array.isArray(body) ? body : [];
+    var off = Number(offsetSec) || 0;
+    if (!off) return arr.slice();
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      if (!isLine(arr[i])) continue;
+      // 起点不允许为负：负时间戳的 SRT 播放器直接拒收。
+      // 起点被压到 0 时保持原时长，而不是把终点一起压到 0——否则前几条会变成
+      // 「0 秒到 0 秒」的空条目，播放器不显示，等于把内容弄丢了。
+      var dur = Math.max(0.1, arr[i].to - arr[i].from);
+      var from = Math.max(0, arr[i].from + off);
+      out.push({ from: from, to: from + dur, content: arr[i].content });
+    }
+    return out;
+  }
+
+  /**
+   * 只要某个时间点之后的部分（v9.11）。
+   * 场景：视频看了 40 分钟，只想导出剩下的；配合「点字幕跳转」用。
+   */
+  function bodyFrom(body, startSec) {
+    var arr = Array.isArray(body) ? body : [];
+    var start = Number(startSec) || 0;
+    if (!(start > 0)) return arr.slice();
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      if (!isLine(arr[i])) continue;
+      if (arr[i].from >= start) out.push(arr[i]);
+    }
+    return out;
+  }
+
+  // 区间导出：只保留 [from, to) 内的行（to 为空 = 到结尾）
+  function bodyRange(body, fromSec, toSec) {
+    var arr = Array.isArray(body) ? body : [];
+    var a = Number(fromSec) || 0;
+    var b = (toSec === undefined || toSec === null || toSec === '') ? Infinity : Number(toSec);
+    if (!isFinite(b)) b = Infinity;
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      if (!isLine(arr[i])) continue;
+      if (arr[i].from >= a && arr[i].from < b) out.push(arr[i]);
+    }
+    return out;
+  }
+
   // v9.10 AI 总结提示词：同类脚本都有「一键生成总结提示词」，本项目以前没有——
   // 用户拿到稿子还得自己想怎么问。这里给四套现成的，点了直接复制「提示词 + 稿子」。
   var AI_PROMPTS = [
@@ -168,6 +221,9 @@ function createSubExportModule() {
   return {
     fmtClock: fmtClock,
     bodyToMd: bodyToMd,
+    shiftBody: shiftBody,
+    bodyFrom: bodyFrom,
+    bodyRange: bodyRange,
     AI_PROMPTS: AI_PROMPTS,
     getPrompt: getPrompt,
     buildPrompt: buildPrompt,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.10.0
+// @version      9.11.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,8 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.11.0 时间轴校正：整体偏移（转写时间轴对不上可整体挪，不产生负时间戳、不把终点压成 0）、
+//        只导出当前播放位置之后；修换视频时检索词与校正未清除（上一条的筛选会套到新视频上）。
 // 9.10.0 竞品对标：点击字幕行跳到视频对应时间（同类脚本的标配，本项目以前只能看不能跳）、
 //        Markdown 导出、AI 总结提示词一键复制（四套现成模板，复制「提示词 + 稿子」直接粘给 AI）。
 // 9.9.0 功能性：字幕内检索（多词与语义，命中行即导出范围，零命中回退全文不导空文件）、
@@ -1341,6 +1343,59 @@
       return out.join('\n');
     }
   
+    /**
+     * 整体平移时间轴（v9.11）。
+     *
+     * 场景：AI 转写出来的时间轴整体早/晚几秒（识别服务按片计算，片头片尾会累积误差），
+     * 或者字幕是给另一个版本的视频配的。用户要的是「整体挪 N 秒」，不是逐条改。
+     */
+    function shiftBody(body, offsetSec) {
+      var arr = Array.isArray(body) ? body : [];
+      var off = Number(offsetSec) || 0;
+      if (!off) return arr.slice();
+      var out = [];
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        // 起点不允许为负：负时间戳的 SRT 播放器直接拒收。
+        // 起点被压到 0 时保持原时长，而不是把终点一起压到 0——否则前几条会变成
+        // 「0 秒到 0 秒」的空条目，播放器不显示，等于把内容弄丢了。
+        var dur = Math.max(0.1, arr[i].to - arr[i].from);
+        var from = Math.max(0, arr[i].from + off);
+        out.push({ from: from, to: from + dur, content: arr[i].content });
+      }
+      return out;
+    }
+  
+    /**
+     * 只要某个时间点之后的部分（v9.11）。
+     * 场景：视频看了 40 分钟，只想导出剩下的；配合「点字幕跳转」用。
+     */
+    function bodyFrom(body, startSec) {
+      var arr = Array.isArray(body) ? body : [];
+      var start = Number(startSec) || 0;
+      if (!(start > 0)) return arr.slice();
+      var out = [];
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        if (arr[i].from >= start) out.push(arr[i]);
+      }
+      return out;
+    }
+  
+    // 区间导出：只保留 [from, to) 内的行（to 为空 = 到结尾）
+    function bodyRange(body, fromSec, toSec) {
+      var arr = Array.isArray(body) ? body : [];
+      var a = Number(fromSec) || 0;
+      var b = (toSec === undefined || toSec === null || toSec === '') ? Infinity : Number(toSec);
+      if (!isFinite(b)) b = Infinity;
+      var out = [];
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        if (arr[i].from >= a && arr[i].from < b) out.push(arr[i]);
+      }
+      return out;
+    }
+  
     // v9.10 AI 总结提示词：同类脚本都有「一键生成总结提示词」，本项目以前没有——
     // 用户拿到稿子还得自己想怎么问。这里给四套现成的，点了直接复制「提示词 + 稿子」。
     var AI_PROMPTS = [
@@ -1371,6 +1426,9 @@
     return {
       fmtClock: fmtClock,
       bodyToMd: bodyToMd,
+      shiftBody: shiftBody,
+      bodyFrom: bodyFrom,
+      bodyRange: bodyRange,
       AI_PROMPTS: AI_PROMPTS,
       getPrompt: getPrompt,
       buildPrompt: buildPrompt,
@@ -1402,7 +1460,9 @@
     audioBuf: null,    // 已解码的 AudioBuffer（复用）
     audioDurSec: 0,    // 音频真实时长（秒）——选路与进度都靠它，不再猜
     audioSizeMB: 0,    // 音频体积（MB）
-    searchKw: ''       // v9.9 字幕内检索词（空 = 不过滤）
+    searchKw: '',      // v9.9 字幕内检索词（空 = 不过滤）
+    shiftSec: 0,       // v9.11 时间轴整体偏移（秒，可正负；只影响导出时间戳与点击跳转）
+    rangeFrom: 0       // v9.11 只保留该时间点之后（0 = 不裁）
   };
   var cache = {};      // key -> body 数组
 
@@ -3473,12 +3533,24 @@
   // 3 小时视频转出来的稿子有几千行，用户要的往往只是提到某个词的那几句。
   // 检索之后：① 文本框只显示命中行 ② 复制 / 导出一律只出命中行——
   // 不用再「导出全文 → 粘到别处 → 自己挑」。关键词为空时原样返回，调用方无需分支。
+  /**
+   * 「要输出的那份字幕」——三步依次作用：检索过滤 → 区间裁剪 → 时间轴偏移。
+   * 文本框、复制、所有导出、点击跳转全部走这里，保证「你看到的就是你拿到的」。
+   */
   function activeBody() {
     if (!state.body) return null;
-    if (!state.searchKw) return state.body;
-    var r = SubExport.searchBody(state.body, state.searchKw);
-    // 一条都没命中就给全文：宁可多给，绝不让用户导出一个空文件
-    return r.matched ? r.body : state.body;
+    var b = state.body;
+    if (state.searchKw) {
+      var r = SubExport.searchBody(b, state.searchKw);
+      // 一条都没命中就给全文：宁可多给，绝不让用户导出一个空文件
+      b = r.matched ? r.body : state.body;
+    }
+    if (state.rangeFrom > 0) {
+      var cut = SubExport.bodyFrom(b, state.rangeFrom);
+      if (cut.length) b = cut;   // 裁没了就退回不裁，同样是不给空文件
+    }
+    if (state.shiftSec) b = SubExport.shiftBody(b, state.shiftSec);
+    return b;
   }
 
   // ===================== 复制 / 下载 =====================
@@ -3597,6 +3669,7 @@
       '.bsr-ops{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}' +
       '.bsr-ops .bsr-btn{flex:1;min-width:70px}' +
       '.bsr-prompts{display:flex;gap:6px;flex-wrap:wrap}' +
+      '.bsr-pbox input[type=number]{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #eee;border-radius:8px;font-size:12px;font-family:inherit}' +
       '.bsr-prompts button{flex:none;padding:5px 10px;font-size:11px;line-height:1.6;border:1px solid #e2e2e6;background:#fafafa;color:#555;border-radius:11px;cursor:pointer;font-family:inherit}' +
       '.bsr-prompts button:hover{border-color:#7C5CBF;color:#7C5CBF}' +
       '.bsr-pbox{display:none;border:1px dashed #ddd;border-radius:8px;padding:8px;margin-top:6px}' +
@@ -3716,6 +3789,7 @@
       '#bsr-root[data-theme="dark"] .bsr-wpreset-tip{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-findinfo{color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-pbox{border-color:#4a4a55}' +
+      '#bsr-root[data-theme="dark"] .bsr-pbox input[type=number]{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
       '#bsr-root[data-theme="dark"] .bsr-prompts button{background:var(--bsr-soft);color:#c5c5cc;border-color:#3d3d47}' +
       '#bsr-root[data-theme="dark"] .bsr-prompts button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-keywrap .eye{color:var(--bsr-muted)}' +
@@ -3793,6 +3867,15 @@
       '      <button class="bsr-btn bsr-asr" id="bsrAsrBtn" style="display:none">🎙 AI 转写</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrUnlock" style="display:none">▶ 解锁播放并继续（浏览器自动播放限制）</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCancel" style="display:none">✖ 取消</button>' +
+      '    </div>' +
+      '    <div class="bsr-set" id="bsrAxisToggle">⏱ 时间轴（对不上就整体挪 · 只导出后半段）</div>' +
+      '    <div class="bsr-pbox" id="bsrAxisBox" style="display:none">' +
+      '      <div class="bsr-wrow"><label>整体偏移（秒，可负）</label><input type="number" id="bsrShift" step="0.5" placeholder="0" /></div>' +
+      '      <div class="bsr-prompts">' +
+      '        <button type="button" id="bsrFromNow">⏱ 只保留当前播放位置之后</button>' +
+      '        <button type="button" id="bsrAxisClear">✕ 清除校正</button>' +
+      '      </div>' +
+      '      <div class="bsr-wtip" id="bsrAxisTip">偏移只改导出文件里的时间戳（和点击跳转落点），不改文字；「只保留当前位置之后」会同时收窄文本框与所有导出。</div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrPromptToggle">🧠 AI 总结提示词（复制后直接粘给 AI）</div>' +
       '    <div class="bsr-pbox" id="bsrPromptBox" style="display:none">' +
@@ -3997,6 +4080,35 @@
       if (!state.body) return;
       var md = SubExport.bodyToMd(activeBody() || [], { title: state.title, up: state.up, lan: state.lan, page: state.page, totalPages: state.totalPages });
       download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.md', '\uFEFF' + md, 'text/markdown;charset=utf-8');
+    };
+    // v9.11 时间轴校正：转写时间轴整体早/晚几秒是常态（识别按片算，误差会累积），
+    // 看了一半想只导出剩下的一半也很常见。这两件事以前都得导出后自己处理。
+    var axisBox = root.querySelector('#bsrAxisBox');
+    root.querySelector('#bsrAxisToggle').onclick = function () {
+      if (!state.body) { toast('请先获取字幕'); return; }
+      axisBox.classList.toggle('show');
+    };
+    var shiftInput = root.querySelector('#bsrShift');
+    if (shiftInput) {
+      shiftInput.oninput = function () {
+        var n = parseFloat(shiftInput.value);
+        state.shiftSec = isFinite(n) ? n : 0;
+        render();
+        shiftInput.focus();
+      };
+    }
+    root.querySelector('#bsrFromNow').onclick = function () {
+      if (!state.body) { toast('请先获取字幕'); return; }
+      var v = state.html5Video || document.querySelector('video');
+      if (!v || !isFinite(v.currentTime)) { toast('这个页面读不到播放位置'); return; }
+      state.rangeFrom = Math.floor(v.currentTime);
+      toast('已只保留 ' + SubExport.fmtClock(state.rangeFrom) + ' 之后的内容');
+      render();
+    };
+    root.querySelector('#bsrAxisClear').onclick = function () {
+      state.shiftSec = 0; state.rangeFrom = 0;
+      toast('已清除时间轴校正');
+      render();
     };
     // v9.10 AI 总结提示词：同类脚本基本都有「一键复制总结提示词」，本项目以前没有——
     // 用户拿到稿子还得自己想怎么问。四套现成的，点了复制「提示词 + 稿子」直接粘给 AI。
@@ -4405,6 +4517,18 @@
       } else fi.style.display = 'none';
     }
     if ($('#bsrFind') && document.activeElement !== $('#bsrFind')) $('#bsrFind').value = state.searchKw || '';
+    // v9.11 时间轴校正状态：写在提示行里，用户一眼知道自己开了什么（不然导出的时间戳莫名偏了）
+    var si = $('#bsrShift');
+    if (si && document.activeElement !== si) si.value = state.shiftSec ? String(state.shiftSec) : '';
+    var at = $('#bsrAxisTip');
+    if (at) {
+      var bits = [];
+      if (state.rangeFrom > 0) bits.push('已只保留 ' + SubExport.fmtClock(state.rangeFrom) + ' 之后');
+      if (state.shiftSec) bits.push('时间轴已整体' + (state.shiftSec > 0 ? '推迟' : '提前') + ' ' + Math.abs(state.shiftSec) + ' 秒');
+      at.textContent = bits.length
+        ? bits.join(' · ')
+        : '偏移只改导出文件里的时间戳（和点击跳转落点），不改文字；「只保留当前位置之后」会同时收窄文本框与所有导出。';
+    }
     $('#bsrOut').value = state.body ? bodyToTxt(activeBody() || []) : (state.noSub ? getVideoInfoText() : '');
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');
     if (state.subs.length) {
@@ -4501,6 +4625,9 @@
     cleanupAudio();
     state.adapter = null; state.cid = null; state.videoId = '';
     state.subs = []; state.body = null; state.lan = ''; state.err = ''; state.noSub = false; state.loading = false; state.asr = null; state.asrRan = false;
+    // v9.11：换视频必须清掉检索词与时间轴校正——留着会把上一条视频的筛选套到新视频上，
+    // 用户拿到的是「少了半截还不知道为什么少」的字幕。
+    state.searchKw = ''; state.shiftSec = 0; state.rangeFrom = 0;
     state.bvid = ''; state.aid = ''; state.title = ''; state.up = ''; state.desc = ''; state.duration = 0;
     state.audioDurSec = 0; state.audioSizeMB = 0; state.audioCh = 0;   // 切视频必须清：否则下一条视频沿用上一条的时长，选路全错
     state.page = RouteIdentity.pageOf(location.href) || 1;   // v9.6：分 P 号直接从 URL 读，切 P 后导出文件名才不会一直写 P1

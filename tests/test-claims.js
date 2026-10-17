@@ -119,6 +119,8 @@ claim('快捷键（输入框内不抢键）', has('hotkeysOn') && has("tagName =
 claim('点击字幕行跳到视频对应时间（同类脚本标配，默认开可关）', has('seekTo') && has('clickSeekOn'));
 claim('Markdown 导出', has('SubExport\\.bodyToMd') && has("\\.md'"));
 claim('AI 总结提示词一键复制（提示词 + 稿子一起复制）', has('AI_PROMPTS') && has('buildPrompt'));
+claim('时间轴偏移校正（转写时间轴对不上可整体挪，不产生负时间戳）', has('shiftBody') && has('shiftSec'));
+claim('只导出当前播放位置之后', has('bodyFrom') && has('rangeFrom'));
 
 // ===================== 九、安全与隐私承诺 =====================
 

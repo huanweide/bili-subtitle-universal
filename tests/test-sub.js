@@ -137,9 +137,11 @@ test('B7 bodyToText：只拼正文，不带时间戳', function () {
 
 test('C1 activeBody 存在，且「零命中回退全文」（绝不导空文件）', function () {
   ok(/function activeBody\(\)/.test(SRC), '要有 activeBody');
-  var body = SRC.slice(SRC.indexOf('function activeBody()'), SRC.indexOf('function activeBody()') + 400);
-  ok(/r\.matched \? r\.body : state\.body/.test(body), '零命中必须回退全文');
-  ok(/if \(!state\.searchKw\) return state\.body;/.test(body), '空关键词返回全文');
+  var body = SRC.slice(SRC.indexOf('function activeBody()'), SRC.indexOf('function activeBody()') + 900);
+  ok(/r\.matched \? r\.body : state\.body/.test(body), '检索零命中必须回退全文');
+  ok(/if \(cut\.length\) b = cut;/.test(body), '区间裁没了也要退回不裁（同样不给空文件）');
+  ok(/if \(state\.searchKw\) \{/.test(body), '空关键词走过滤分支之外');
+  ok(/SubExport\.shiftBody/.test(body), '要应用时间轴偏移');
 });
 
 test('C2 复制 / TXT / SRT 三个主按钮都走 activeBody（不是绕过过滤直接拿 state.body）', function () {
@@ -325,6 +327,98 @@ test('E7 点击跳转受设置控制（默认开，可在设置里关）', funct
 
 test('E8 文本框告诉用户可以点（不然没人知道能跳）', function () {
   ok(/点某一行可以跳到视频的对应时间/.test(SRC), 'title 要写清楚');
+});
+
+// ===================== F. v9.11 时间轴校正 =====================
+
+test('F1 shiftBody：整体平移，且不产生负时间戳（负时间戳的 SRT 播放器直接拒收）', function () {
+  var late = SubExport.shiftBody(BODY, 3);
+  eq(late[0].from, 3, '起点 +3');
+  eq(late[0].to, 5, '终点 +3');
+  eq(late[0].content, BODY[0].content, '文字不能动');
+  var early = SubExport.shiftBody(BODY, -3);
+  eq(early[0].from, 0, '起点被压到 0，不能是负的');
+  eq(early[0].to, 2, '起点被压到 0 时保持原时长，不能压成「0 秒到 0 秒」的空条目');
+  eq(early[3].from, 6, '够远的正常平移（9-3）');
+  eq(early[3].to, 9, '时长保持');
+  // 任何一条都不能出现 to <= from（0 时长或倒挂 = 播放器不显示）
+  early.concat(late).forEach(function (x, i) { ok(x.to > x.from, '第 ' + i + ' 条 to 必须大于 from'); });
+});
+
+test('F2 shiftBody 偏移为 0 / 非法值时原样返回', function () {
+  var r = SubExport.shiftBody(BODY, 0);
+  eq(r.length, 5, '条数不变');
+  eq(r[0].from, 0, '时间不变');
+  eq(SubExport.shiftBody(BODY, 'abc').length, 5, '非法值按 0 处理');
+});
+
+test('F3 bodyFrom：只保留该时间点之后', function () {
+  var r = SubExport.bodyFrom(BODY, 5);
+  eq(r.length, 3, '5 秒之后有 3 条');
+  eq(r[0].from, 5, '含边界');
+  eq(SubExport.bodyFrom(BODY, 0).length, 5, '起点 0 = 不裁');
+  eq(SubExport.bodyFrom(BODY, -10).length, 5, '负数 = 不裁');
+  eq(SubExport.bodyFrom(BODY, 999).length, 0, '超范围裁空（调用方负责回退）');
+});
+
+test('F4 bodyRange：区间导出，to 缺省表示到结尾', function () {
+  eq(SubExport.bodyRange(BODY, 2, 9).length, 2, '2~9 秒两条');
+  eq(SubExport.bodyRange(BODY, 9).length, 2, '只给起点');
+  eq(SubExport.bodyRange(BODY, 0, 999).length, 5, '全区间');
+});
+
+test('F5 三个时间轴函数对脏输入都不崩', function () {
+  ok(Array.isArray(SubExport.shiftBody(null, 5)), 'shift null');
+  ok(Array.isArray(SubExport.bodyFrom('不是数组', 5)), 'from 字符串');
+  ok(Array.isArray(SubExport.bodyRange([null, { from: 0, to: 1, content: 'x' }], 0, 10)), '含脏行');
+});
+
+// ===================== G. v9.11 接线 =====================
+
+test('G1 时间轴折叠区：HTML 两侧都在', function () {
+  ok(/id="bsrAxisToggle"/.test(SRC), '折叠开关');
+  ok(/id="bsrAxisBox"/.test(SRC), '容器');
+  ok(/id="bsrShift"/.test(SRC), '偏移输入');
+  ok(/id="bsrFromNow"/.test(SRC), '从当前位置按钮');
+  ok(/id="bsrAxisClear"/.test(SRC), '清除按钮');
+});
+
+test('G2 偏移输入：有绑定、有回填、非法值归零', function () {
+  var m = SRC.slice(SRC.indexOf('shiftInput.oninput'), SRC.indexOf('shiftInput.oninput') + 300);
+  ok(/parseFloat\(shiftInput\.value\)/.test(m), '要读输入值');
+  ok(/state\.shiftSec = isFinite\(n\) \? n : 0/.test(m), '非法值归零');
+  ok(/si\.value = state\.shiftSec \? String\(state\.shiftSec\) : ''/.test(SRC), 'render 要回填');
+});
+
+test('G3 「只保留当前位置之后」：读不到播放位置要明说，不能静默啥也不干', function () {
+  ok(/#bsrFromNow'\)\.onclick/.test(SRC), '要有绑定');
+  ok(/读不到播放位置/.test(SRC), '读不到要提示');
+  ok(/state\.rangeFrom = Math\.floor\(v\.currentTime\)/.test(SRC), '要写入起点');
+});
+
+test('G4 清除按钮同时清偏移与裁剪', function () {
+  // 必须限定在清除按钮的处理里：整份源码里 resetForNewVideo 也写了同一串，
+  // 只查全文的话「清了一半」的变异会被另一处顶住，出现假绿（v9.11 变异 M5 实测）。
+  var clr = SRC.slice(SRC.indexOf("#bsrAxisClear').onclick"), SRC.indexOf("#bsrAxisClear').onclick") + 320);
+  ok(clr.length > 50, '要能定位到清除按钮的处理');
+  ok(/state\.shiftSec = 0; state\.rangeFrom = 0;/.test(clr), '清除按钮里两项都要清');
+});
+
+test('G5 换视频必须清掉检索词与时间轴校正（否则上一条的筛选套到新视频上）', function () {
+  var body = SRC.slice(SRC.indexOf('function resetForNewVideo()'), SRC.indexOf('function resetForNewVideo()') + 900);
+  ok(/state\.searchKw = ''; state\.shiftSec = 0; state\.rangeFrom = 0;/.test(body), 'reset 里必须清三项');
+});
+
+test('G6 开了校正要显示出来（不然导出时间戳偏了都不知道为什么）', function () {
+  ok(/时间轴已整体/.test(SRC), '要提示偏移方向');
+  ok(/已只保留/.test(SRC), '要提示裁剪起点');
+});
+
+test('G7 反向断言：偏移只能改时间，不得动文字', function () {
+  var shifted = SubExport.shiftBody(BODY, 30);
+  for (var i = 0; i < BODY.length; i++) {
+    eq(shifted[i].content, BODY[i].content, '第 ' + i + ' 条文字必须逐字不变');
+  }
 });
 
 console.log('----------------------------------------');

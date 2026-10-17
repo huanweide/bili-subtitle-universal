@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.8.0
+// @version      9.9.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,9 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.9.0 功能性：字幕内检索（多词与语义，命中行即导出范围，零命中回退全文不导空文件）、
+//       VTT 导出、快捷键（Alt+S / Esc / Ctrl+Enter，输入框内不抢键，可关）；
+//       修 VTT 时间戳浮点进位（59.9996 秒曾写出 00:00:60.000，播放器拒收）。
 // 9.8.0 通用性：站点与页面形态识别集中成 SiteMatch 规则表。新增认领「网页里 iframe 嵌入的
 //       B 站播放器」「稍后再看 / 收藏夹 / 合集」「B 站课堂」，并从 URL 查询串抽 bvid/cid/aid
 //       （这些形态的视频号只在参数里）。通用站不再只认第一个 <video>，改为遍历全部、
@@ -1198,6 +1201,121 @@
     };
   }
   var SiteMatch = createSiteMatchModule();
+  /**
+   * 字幕检索与更多导出格式（v9.9）。
+   *
+   * 背景：3 小时视频转出来的稿子有几千行，用户想找其中一句「反向传播」时，
+   * 只能把整篇复制到别处再 Ctrl+F。而他要的往往就那几句——导出时也一样，
+   * 只想导出命中的部分。这里把「在字幕里找词」和「只导出命中行」做成一层纯函数。
+   *
+   * 设计约束：
+   * 1. 纯函数，不碰 DOM / state——Node 里能完整测试。
+   * 2. 搜索是「与」语义：空格分开的多个词必须全部命中，便于一次收敛到目标句。
+   * 3. 空关键词 = 不过滤（返回原样），调用方不用区分「没搜」和「全命中」。
+   * 4. 脏数据（null / 非数组 / 缺 content / 时间非数字）一律跳过，不抛异常。
+   */
+  function createSubExportModule() {
+    function pad(n, w) {
+      var s = String(Math.max(0, Math.floor(Number(n) || 0)));
+      while (s.length < (w || 2)) s = '0' + s;
+      return s;
+    }
+  
+    // 秒 → HH:MM:SS.mmm（VTT 用点号分隔毫秒，与 SRT 的逗号不同，别混用）
+    // 函数名刻意不叫 vttTime：主脚本已有同名解析函数，而单元测试是「按名字从源码里抠出
+    // 函数体来跑」的——注入模块若与之同名，抠到的就是模块里的版本，7 条 VTT 用例会集体
+    // 报 pad is not defined（v9.9 实测踩到）。同理，注释里也不要写出那个名字加左括号，
+    // 否则提取正则会连注释一起抠走。
+    function fmtVtt(t) {
+      // 先整体换算成毫秒整数再分解：直接对秒取模会被浮点咬一口——
+      // 59.9996 秒按「整数部分 + 小数部分×1000」算会得到 00:00:60.000（秒没进位到分），
+      // 这是播放器直接拒收的脏时间轴。
+      var totalMs = Math.round(Math.max(0, Number(t) || 0) * 1000);
+      var ms = totalMs % 1000;
+      var totalSec = Math.floor(totalMs / 1000);
+      var h = Math.floor(totalSec / 3600);
+      var m = Math.floor((totalSec % 3600) / 60);
+      var s = totalSec % 60;
+      return pad(h) + ':' + pad(m) + ':' + pad(s) + '.' + pad(ms, 3);
+    }
+  
+    function isLine(x) {
+      return !!x && typeof x.content === 'string' && x.content.trim() !== '' &&
+             isFinite(Number(x.from)) && isFinite(Number(x.to));
+    }
+  
+    function bodyToVtt(body) {
+      var out = ['WEBVTT', ''];
+      var arr = Array.isArray(body) ? body : [];
+      var n = 0;
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        n++;
+        out.push(String(n));
+        out.push(fmtVtt(arr[i].from) + ' --> ' + fmtVtt(arr[i].to));
+        out.push(arr[i].content.trim().replace(/\r/g, ''));
+        out.push('');
+      }
+      return out.join('\n');
+    }
+  
+    /**
+     * 在字幕里找词。
+     * 返回 { body, matched, total, empty }：
+     *  - body：命中行（关键词为空时原样返回，调用方无需分支）
+     *  - matched / total：命中数与总行数，用于显示「命中 8 / 1240 条」
+     */
+    function searchBody(body, keyword) {
+      var arr = Array.isArray(body) ? body : [];
+      var total = 0, i;
+      for (i = 0; i < arr.length; i++) if (isLine(arr[i])) total++;
+      var kw = String(keyword == null ? '' : keyword).trim();
+      if (!kw) return { body: arr, matched: total, total: total, filtering: false };
+      var needles = kw.toLowerCase().split(/\s+/).filter(function (s) { return s; });
+      var out = [];
+      for (i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        var hay = arr[i].content.toLowerCase();
+        var hit = true;
+        for (var k = 0; k < needles.length; k++) {
+          if (hay.indexOf(needles[k]) < 0) { hit = false; break; }
+        }
+        if (hit) out.push(arr[i]);
+      }
+      return { body: out, matched: out.length, total: total, filtering: true };
+    }
+  
+    // 命中行的时间跨度：用于提示「这 8 条分布在 00:12 ~ 01:40」
+    function spanOf(body) {
+      var arr = Array.isArray(body) ? body : [];
+      var min = Infinity, max = -Infinity, n = 0;
+      for (var i = 0; i < arr.length; i++) {
+        if (!isLine(arr[i])) continue;
+        n++;
+        if (arr[i].from < min) min = arr[i].from;
+        if (arr[i].to > max) max = arr[i].to;
+      }
+      if (!n) return null;
+      return { from: min, to: max, count: n };
+    }
+  
+    // 给 AI 用的纯文本，模块内再提供一份：调用方不必为了拿文本而绕过过滤
+    function bodyToText(body) {
+      var arr = Array.isArray(body) ? body : [];
+      var out = [];
+      for (var i = 0; i < arr.length; i++) if (isLine(arr[i])) out.push(arr[i].content.trim());
+      return out.join('\n');
+    }
+  
+    return {
+      vttTime: fmtVtt,     // 对外仍叫 vttTime（语义清晰），对内改名只为避开提取正则
+      bodyToVtt: bodyToVtt,
+      searchBody: searchBody,
+      spanOf: spanOf,
+      bodyToText: bodyToText
+    };
+  }
+  var SubExport = createSubExportModule();
   // </build:modules>
 
   // ===================== 状态 =====================
@@ -1217,7 +1335,8 @@
     audioBlob: null,   // 已下载的音频 blob（复用）
     audioBuf: null,    // 已解码的 AudioBuffer（复用）
     audioDurSec: 0,    // 音频真实时长（秒）——选路与进度都靠它，不再猜
-    audioSizeMB: 0     // 音频体积（MB）
+    audioSizeMB: 0,    // 音频体积（MB）
+    searchKw: ''       // v9.9 字幕内检索词（空 = 不过滤）
   };
   var cache = {};      // key -> body 数组
 
@@ -1248,7 +1367,9 @@
     // v9.6 导出形态按钮（AI 文本 / 锚点稿）的动作：copy=只复制（默认）/ download=只下载 / both=复制+下载
     exportMode: GM_getValue('bsr_export_mode', 'copy'),
     // v9.6 面板主题：auto=跟随系统（默认）/ light=始终浅色 / dark=始终深色
-    theme: GM_getValue('bsr_theme', 'auto')
+    theme: GM_getValue('bsr_theme', 'auto'),
+    // v9.9 快捷键：Alt+S 开合面板 / Esc 收起 / Ctrl+Enter 取字幕。可关（避免与站点快捷键打架）
+    hotkeysOn: GM_getValue('bsr_hotkeys', true)
   };
   function saveSettings() {
     try {
@@ -1273,6 +1394,7 @@
       GM_setValue('bsr_auto_fetch_page', SETTINGS.autoFetchOnPageSwitch);
       GM_setValue('bsr_export_mode', SETTINGS.exportMode);
       GM_setValue('bsr_theme', SETTINGS.theme);
+      GM_setValue('bsr_hotkeys', SETTINGS.hotkeysOn);
     } catch (e) { log('设置保存失败', e); }
   }
 
@@ -1323,6 +1445,13 @@
     return p(h, 2) + ':' + p(m, 2) + ':' + p(sec, 2) + ',' + p(ms, 3);
   }
   function bodyToTxt(body) { return body.map(function (x) { return x.content; }).join('\n'); }
+  // 秒 → m:ss / h:mm:ss（给人看的时间点，用于检索命中的时间跨度提示）
+  function fmtClock(sec) {
+    var s = Math.max(0, Math.floor(Number(sec) || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var mm = h ? (m < 10 ? '0' + m : String(m)) : String(m);
+    return (h ? h + ':' : '') + mm + ':' + (ss < 10 ? '0' + ss : String(ss));
+  }
   function bodyToSrt(body) {
     var out = [];
     for (var i = 0; i < body.length; i++) {
@@ -3112,11 +3241,11 @@
   }
   function exportAiText() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    emitExport(state.title + '_AI纯文本', TranscriptQuality.bodyToAiText(state.body));
+    emitExport(state.title + '_AI纯文本', TranscriptQuality.bodyToAiText(activeBody() || []));
   }
   function exportAnchored() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    emitExport(state.title + '_章节锚点稿', TranscriptQuality.bodyToAnchoredText(state.body, { gapSec: 300 }));
+    emitExport(state.title + '_章节锚点稿', TranscriptQuality.bodyToAnchoredText(activeBody() || [], { gapSec: 300 }));
   }
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
@@ -3261,6 +3390,18 @@
     }
   }
 
+  // ===================== v9.9 字幕内检索 =====================
+  // 3 小时视频转出来的稿子有几千行，用户要的往往只是提到某个词的那几句。
+  // 检索之后：① 文本框只显示命中行 ② 复制 / 导出一律只出命中行——
+  // 不用再「导出全文 → 粘到别处 → 自己挑」。关键词为空时原样返回，调用方无需分支。
+  function activeBody() {
+    if (!state.body) return null;
+    if (!state.searchKw) return state.body;
+    var r = SubExport.searchBody(state.body, state.searchKw);
+    // 一条都没命中就给全文：宁可多给，绝不让用户导出一个空文件
+    return r.matched ? r.body : state.body;
+  }
+
   // ===================== 复制 / 下载 =====================
   function copyInviteCode() {
     var code = 'axOmWfWi';
@@ -3321,6 +3462,15 @@
   // 头部按钮点一下 = 在深浅之间直接切（切的是显式值，不是改 auto）
   function toggleTheme() { SETTINGS.theme = isDarkPreferred() ? 'light' : 'dark'; saveSettings(); applyTheme(); }
 
+  // v9.9 面板开合：点 FAB 与按 Alt+S 走同一个出口，状态不会两处漂移
+  function togglePanel() {
+    if (!root) return;
+    var p = root.querySelector('#bsr-panel');
+    if (!p) return;
+    p.classList.toggle('show');
+    if (p.classList.contains('show')) render();
+  }
+
   function buildUI() {
     if (root) return;
     root = document.createElement('div');
@@ -3367,6 +3517,9 @@
       '.bsr-mini:hover{transform:scale(1.04)}' +
       '.bsr-ops{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}' +
       '.bsr-ops .bsr-btn{flex:1;min-width:70px}' +
+      '.bsr-subfind{display:flex;gap:6px;margin-bottom:6px}' +
+      '.bsr-subfind .bsr-input{margin-bottom:0;flex:1;min-width:0}' +
+      '.bsr-findinfo{font-size:10px;color:#7C5CBF;margin:0 0 6px;line-height:1.5}' +
       '.bsr-set{margin:8px 0 4px;font-size:12px;color:#7C5CBF;cursor:pointer;user-select:none}' +
       '.bsr-setbox{display:none;border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:8px}' +
       '.bsr-setbox.show{display:block}' +
@@ -3477,6 +3630,7 @@
       '#bsr-root[data-theme="dark"] .bsr-wpresets button{background:var(--bsr-soft);color:#c5c5cc;border-color:#3d3d47}' +
       '#bsr-root[data-theme="dark"] .bsr-wpresets button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-wpreset-tip{color:var(--bsr-muted)}' +
+      '#bsr-root[data-theme="dark"] .bsr-findinfo{color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-keywrap .eye{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.yes{background:#14352a;color:#5fd6a8}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.no{background:#3a2020;color:#ff9a9a}' +
@@ -3534,6 +3688,11 @@
       '        <button class="bsr-btn bsr-cancel" id="bsrAsrRestart" style="flex:none;margin-left:auto;font-size:11px;padding:3px 8px" title="放弃磁盘保存的已完成批次，从第 1 批重新开始（当前正在转写的那批结果会丢弃，已花的额度不退）">↺ 重新开始</button>' +
       '      </div>' +
       '    </div>' +
+      '    <div class="bsr-subfind" id="bsrFindRow" style="display:none">' +
+      '      <input class="bsr-input" id="bsrFind" placeholder="在字幕里找词（多词空格分开；命中行即导出范围）" autocomplete="off" />' +
+      '      <button type="button" class="bsr-btn bsr-c" id="bsrFindClear" style="flex:none" title="清空检索，恢复全篇">✕</button>' +
+      '    </div>' +
+      '    <div class="bsr-findinfo" id="bsrFindInfo" style="display:none"></div>' +
       '    <textarea class="bsr-ta" id="bsrOut" readonly placeholder="点击「获取字幕」后，字幕文字将显示在这里"></textarea>' +
       '    <div class="bsr-ops" id="bsrOps" style="display:none">' +
       '      <button class="bsr-btn bsr-c" id="bsrCopy">📋 复制</button>' +
@@ -3541,6 +3700,7 @@
       '      <button class="bsr-btn bsr-s" id="bsrSrt">⬇ SRT</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrAiTxt" title="剥掉时间戳的纯文本，喂给 AI 做总结最省 token">🤖 AI 文本</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrAnchor" title="带章节级时间锚点，适合人读与跳转">⏱ 锚点稿</button>' +
+      '      <button class="bsr-btn bsr-s" id="bsrVtt" title="WebVTT 格式，可挂播放器或导进剪辑软件">⬇ VTT</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCorrect" style="display:none" title="用 chat 模型只改错别字/同音字/专有名词，不改句式">✨ AI 纠错</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrAsrBtn" style="display:none">🎙 AI 转写</button>' +
       '      <button class="bsr-btn bsr-asr" id="bsrUnlock" style="display:none">▶ 解锁播放并继续（浏览器自动播放限制）</button>' +
@@ -3685,6 +3845,7 @@
       '        <option value="light">始终浅色</option>' +
       '        <option value="dark">始终深色</option>' +
       '      </select>' +
+      '      <label class="chk"><input type="checkbox" id="bsrHotkeys" /> 快捷键：Alt+S 开合面板 · Esc 收起 · Ctrl/⌘+Enter 取字幕（输入框内不抢键）</label>' +
       '      <button class="bsr-btn bsr-s bsr-save" id="bsrSaveSet">保存设置</button>' +
       '    </div>' +
       '  </div>' +
@@ -3694,7 +3855,23 @@
       '<div id="bsr-toast"></div>';
     document.body.appendChild(root);
 
-    root.querySelector('#bsr-fab').onclick = function () { root.querySelector('#bsr-panel').classList.toggle('show'); };
+    root.querySelector('#bsr-fab').onclick = function () { togglePanel(); };
+    // v9.9 快捷键：Alt+S 开合面板 / Esc 收起 / Ctrl(Cmd)+Enter 取字幕。
+    // 在输入框里打字时不抢键，否则在搜索框里打 s 就把面板关了——那是最招骂的一类快捷键。
+    document.addEventListener('keydown', function (e) {
+      if (!SETTINGS.hotkeysOn) return;
+      var t = e.target;
+      var typing = !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable));
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 's' || e.key === 'S' || e.code === 'KeyS')) {
+        e.preventDefault(); e.stopPropagation(); togglePanel(); return;
+      }
+      if (e.key === 'Escape' && !typing) {
+        var p = root.querySelector('#bsr-panel');
+        if (p && p.classList.contains('show')) { e.stopPropagation(); p.classList.remove('show'); render(); }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); getSubtitles(); }
+    }, true);
     // 胶囊：转写中把面板收成一个小圆条，不挡视频；点一下再展开
     // 点小条 = 展开面板（小条只在面板收起时出现，不存在「收起小条」这个动作）
     root.querySelector('#bsrMini').onclick = function () {
@@ -3714,9 +3891,22 @@
     } catch (e) {}
     root.querySelector('#bsrThemeBtn').onclick = function () { toggleTheme(); };
     root.querySelector('#bsrGet').onclick = function () { getSubtitles(); };
-    root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(state.body) : getVideoInfoText()); };
-    root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(state.body)); };
-    root.querySelector('#bsrSrt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.srt', '\uFEFF' + bodyToSrt(state.body), 'text/plain;charset=utf-8'); };
+    // v9.9：检索命中时只导命中行（activeBody 已处理「空关键词」与「零命中」两种兜底）
+    root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(activeBody() || []) : getVideoInfoText()); };
+    root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(activeBody() || [])); };
+    root.querySelector('#bsrSrt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.srt', '\uFEFF' + bodyToSrt(activeBody() || []), 'text/plain;charset=utf-8'); };
+    root.querySelector('#bsrVtt').onclick = function () {
+      if (!state.body) return;
+      download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.vtt', '\uFEFF' + SubExport.bodyToVtt(activeBody() || []), 'text/vtt;charset=utf-8');
+    };
+    // 检索框：输入即筛（不回车也生效），清空按钮恢复全篇
+    var findInput = root.querySelector('#bsrFind');
+    if (findInput) {
+      findInput.oninput = function () { state.searchKw = findInput.value.trim(); render(); findInput.focus(); };
+      findInput.onkeydown = function (e) { if (e.key === 'Escape') { findInput.value = ''; state.searchKw = ''; render(); e.stopPropagation(); } };
+    }
+    var findClear = root.querySelector('#bsrFindClear');
+    if (findClear) findClear.onclick = function () { state.searchKw = ''; render(); var fi = root.querySelector('#bsrFind'); if (fi) fi.focus(); };
     root.querySelector('#bsrLan').onchange = function (e) { switchLan(e.target.value); };
     root.querySelector('#bsrCancel').onclick = function () { if (state.asr) state.asr.cancel = true; };
     root.querySelector('#bsrAsrBtn').onclick = function () { runAsr(); };
@@ -3765,6 +3955,7 @@
       SETTINGS.autoFetchOnPageSwitch = root.querySelector('#bsrAutoFetchPage').checked;
       SETTINGS.exportMode = root.querySelector('#bsrExportMode').value;
       SETTINGS.theme = root.querySelector('#bsrTheme').value;
+      SETTINGS.hotkeysOn = root.querySelector('#bsrHotkeys').checked;
       saveSettings();
       applyTheme();
       toast('设置已保存');
@@ -3942,6 +4133,7 @@
     root.querySelector('#bsrAutoFetchPage').checked = SETTINGS.autoFetchOnPageSwitch;
     root.querySelector('#bsrExportMode').value = SETTINGS.exportMode || 'copy';
     root.querySelector('#bsrTheme').value = SETTINGS.theme || 'auto';
+    root.querySelector('#bsrHotkeys').checked = SETTINGS.hotkeysOn;
     root.querySelector('#bsrSearchPlatform').value = SETTINGS.searchPlatform;
     root.querySelector('#bsrSearchOrder').value = search.order;
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
@@ -4072,7 +4264,21 @@
       resumeRow.style.display = resuming ? 'flex' : 'none';
       if (resuming && state.asr.resumeTip) $('#bsrResumeTip').textContent = state.asr.resumeTip;
     }
-    $('#bsrOut').value = state.body ? bodyToTxt(state.body) : (state.noSub ? getVideoInfoText() : '');
+    // v9.9 检索：文本框只显示命中行，命中数直接写在框上方（不用猜有没有筛掉东西）
+    var fr = $('#bsrFindRow'), fi = $('#bsrFindInfo');
+    if (fr) fr.style.display = state.body ? 'flex' : 'none';
+    if (fi) {
+      var res = state.body ? SubExport.searchBody(state.body, state.searchKw) : null;
+      if (res && state.searchKw) {
+        var span = SubExport.spanOf(res.body);
+        fi.style.display = 'block';
+        fi.textContent = res.matched
+          ? '命中 ' + res.matched + ' / ' + res.total + ' 条' + (span ? '（' + fmtClock(span.from) + ' ~ ' + fmtClock(span.to) + '）' : '') + ' · 复制与导出只出命中行'
+          : '没找到「' + state.searchKw + '」（全篇 ' + res.total + ' 条）· 复制与导出会导出全文';
+      } else fi.style.display = 'none';
+    }
+    if ($('#bsrFind') && document.activeElement !== $('#bsrFind')) $('#bsrFind').value = state.searchKw || '';
+    $('#bsrOut').value = state.body ? bodyToTxt(activeBody() || []) : (state.noSub ? getVideoInfoText() : '');
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');
     if (state.subs.length) {
       lanRow.style.display = 'flex';

@@ -207,6 +207,25 @@ check('「↺ 重新开始」清断点 + 作废旧轮次（asrGen++）+ 重启 A
 check('断点提示行随 state.asr.resumed 显隐（render 里管，不是建完就不管）',
   /state\.asr\.resumed/.test(SRC) && /resumeRow\.style\.display = resuming/.test(SRC));
 
+// v9.9 事故回归：modules/*.js 会被 build.js 整段塞进主脚本，而 run-tests.js 是
+// 「按名字用正则抠函数体」来跑单测的。注入区里一旦出现同名的函数定义（哪怕在注释里），
+// 抠到的就是模块里的版本 → 7 条 VTT 用例以 pad is not defined 集体红，
+// 而且报错信息完全指不到真正的原因。这里把「注入区不得与提取名单重名」钉死。
+const RT = fs.readFileSync(path.join(__dirname, 'run-tests.js'), 'utf8');
+const funcsBlock = (RT.match(/const funcs = \[([\s\S]*?)\];/) || [])[1] || '';
+const EXTRACTED = (funcsBlock.match(/'([A-Za-z_$][\w$]*)'/g) || []).map((s) => s.slice(1, -1));
+const zoneA = SRC.indexOf('// <build:modules>');
+const zoneB = SRC.indexOf('// </build:modules>');
+const ZONE = zoneA >= 0 && zoneB > zoneA ? SRC.slice(zoneA, zoneB) : '';
+const CLASH = EXTRACTED.filter((n) => new RegExp('function\\s+' + n + '\\s*\\(').test(ZONE));
+
+check('单测提取名单非空（否则下一条是假绿）', EXTRACTED.length >= 20, '实际 ' + EXTRACTED.length + ' 个');
+check('能取到 build:modules 注入区（否则下一条是假绿）', ZONE.length > 2000, '实际 ' + ZONE.length);
+check('注入模块区不得出现与单测提取名单同名的函数（v9.9 事故：同名会让 run-tests 抠错函数）',
+  CLASH.length === 0, '重名：' + CLASH.join('、'));
+check('注入区的注释里也不许写出「function 名单名(」（正则连注释一起抠，同样会炸）',
+  !EXTRACTED.some((n) => ZONE.indexOf('function ' + n + '(') >= 0), '注释里出现了同名串');
+
 console.log('----------------------------------------');
 console.log(fail === 0 ? 'PASS ' + pass + '/' + (pass + fail) : 'FAIL ' + fail + ' 项（共 ' + (pass + fail) + '）');
 process.exit(fail === 0 ? 0 : 1);

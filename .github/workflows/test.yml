@@ -25,7 +25,7 @@ jobs:
         run: node tests/run-tests.js
       - name: 候选评分 / 转写质量测试（19 项）
         run: node tests/test-scorer.js
-      - name: 接线验证测试（95 项：模块有定义还必须有调用方，UI 元素两侧都要在）
+      - name: 接线验证测试（99 项：模块有定义还必须有调用方，UI 元素两侧都要在）
         run: node tests/test-wiring.js
       - name: 路由身份与导出动作测试（25 条：锚点不误伤 / 换 P 必换 / 反向断言防回潮）
         run: node tests/test-route.js
@@ -33,5 +33,7 @@ jobs:
         run: node tests/test-ui.js
       - name: 站点认领测试（15 条：页面形态认领 / 不认领清单 / 钓鱼域名 / URL 参数消毒）
         run: node tests/test-site.js
+      - name: 检索与导出测试（23 条：字幕内检索 / VTT 时间戳 / 快捷键 / 反向断言）
+        run: node tests/test-sub.js
       - name: 文档一致性门禁（版本号 / 测试数不得漂移）
         run: node tests/check-docs.js

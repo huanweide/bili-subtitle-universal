@@ -11,7 +11,8 @@ const modules = [
   { file: 'transcript-quality.js', init: 'var TranscriptQuality = createTranscriptQualityModule();' },
   { file: 'seg-resume.js', init: 'var SegResume = createSegResumeModule();' },
   { file: 'route-identity.js', init: 'var RouteIdentity = createRouteIdentityModule();' },
-  { file: 'site-match.js', init: 'var SiteMatch = createSiteMatchModule();' }
+  { file: 'site-match.js', init: 'var SiteMatch = createSiteMatchModule();' },
+  { file: 'sub-export.js', init: 'var SubExport = createSubExportModule();' }
 ];
 
 function browserSource(file) {

@@ -16,6 +16,26 @@ function createCandidateScorerModule() {
     excludeKeyword: -36
   };
 
+  // 滑块面板的中文标签与取值范围。新增权重键时这里必须同步加一项：
+  // 滑块面板按这两个表渲染，漏加标签 = 该项在面板里静默消失（非技术用户根本
+  // 不知道能调它）。test-scorer 有断言钉死「标签键集合 === 默认权重键集合」。
+  var WEIGHT_LABELS = {
+    nativeSubtitle: '有原生字幕（免 ASR）',
+    noNativeSubtitle: '无原生字幕（要 ASR）',
+    subtitleUnknown: '字幕状态未知',
+    durationIdeal: '时长 8–60 分钟',
+    durationTooShort: '时长不足 3 分钟',
+    durationTooLong: '时长超过 2 小时',
+    knowledgeCategory: '知识类分区',
+    knowledgeKeyword: '标题含知识词',
+    favoriteLikeRatio: '收藏/点赞比',
+    coinLikeRatio: '投币/点赞比',
+    excludeKeyword: '标题含排除词'
+  };
+  // 与 normalizeWeights 的 clamp(-100, 100) 保持一致：滑块到头就是截断边界，
+  // 不会出现「拖到 150 被静默截回 100」的货不对板。
+  var WEIGHT_RANGE = { min: -100, max: 100 };
+
   var KNOWLEDGE_CATEGORY_RE = /(知识|科技|科普|校园|学习|教育|职场|计算机|编程|数码|财经|商业|公开课|讲座)/i;
   var KNOWLEDGE_TITLE_RE = /(教程|讲解|保姆级|从零|入门|原理|拆解|复盘|一文讲透|how\s+to|explained|deep\s+dive|crash\s+course)/i;
   var EXCLUDE_TITLE_RE = /(直播回放|reaction|挑战|翻唱|整活)/i;
@@ -117,6 +137,8 @@ function createCandidateScorerModule() {
 
   return {
     DEFAULT_WEIGHTS: Object.assign({}, DEFAULT_WEIGHTS),
+    WEIGHT_LABELS: Object.assign({}, WEIGHT_LABELS),
+    WEIGHT_RANGE: { min: WEIGHT_RANGE.min, max: WEIGHT_RANGE.max },
     normalizeWeights: normalizeWeights,
     scoreCandidate: scoreCandidate
   };

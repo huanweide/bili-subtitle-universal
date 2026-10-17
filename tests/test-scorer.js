@@ -15,7 +15,7 @@
  * 覆盖范围：
  *   A. CandidateScorer 评分引擎：知识类 A 档 / 娱乐 C 档 / 无字幕重罚（最高权重信号）/
  *      空标题·null 字段·超长标题·时长为 0 或负不崩 / 可解释性（reasons 结构）/
- *      权重可配（含 null 回退与 ±100 截断）
+ *      权重可配（含 null 回退与 ±100 截断）/ 滑块标签表与范围（v9.3）
  *   B. SearchFilter 纯函数：parseCount / parseBiliDuration / parseIsoDuration /
  *      normalizeBilibili（含 'false' 字符串字幕标记纠错）/ filterCandidates / randomDelayMs
  *   C. TranscriptQuality：相邻重复行去重（精确重复 / 部分重叠 / 包含 / 空行）/
@@ -192,6 +192,23 @@ test('A6 权重可配：改权重对象后分数跟着变；null/空串/越界�
   eq(CandidateScorer.normalizeWeights({ nativeSubtitle: 999 }).nativeSubtitle, 100, '越界上截断到 100');
   eq(CandidateScorer.normalizeWeights({ nativeSubtitle: -999 }).nativeSubtitle, -100, '越界下截断到 -100');
   eq(CandidateScorer.DEFAULT_WEIGHTS.nativeSubtitle, 42, '默认权重表可读');
+});
+test('A7 WEIGHT_LABELS 与 DEFAULT_WEIGHTS 键集合一致（v9.3 滑块面板不少项）', function () {
+  var dKeys = Object.keys(CandidateScorer.DEFAULT_WEIGHTS).sort();
+  var lKeys = Object.keys(CandidateScorer.WEIGHT_LABELS).sort();
+  deepEq(lKeys, dKeys, '标签键集合必须与默认权重键集合一致：新增权重忘加标签 = 滑块面板静默少一项');
+  lKeys.forEach(function (k) {
+    ok(typeof CandidateScorer.WEIGHT_LABELS[k] === 'string' && CandidateScorer.WEIGHT_LABELS[k].length > 0,
+      '标签不能为空：' + k);
+  });
+});
+test('A8 WEIGHT_RANGE 与归一化截断边界同源（滑块到头 = 截断值，不货不对板）', function () {
+  var r = CandidateScorer.WEIGHT_RANGE;
+  ok(r.min === -100 && r.max === 100, '范围应为 -100..100，实际 ' + r.min + '..' + r.max);
+  eq(CandidateScorer.normalizeWeights({ nativeSubtitle: r.max + 500 }).nativeSubtitle, r.max,
+    '超上限归一化后必须等于滑块最大值');
+  eq(CandidateScorer.normalizeWeights({ noNativeSubtitle: r.min - 500 }).noNativeSubtitle, r.min,
+    '超下限归一化后必须等于滑块最小值');
 });
 
 // ============================================================

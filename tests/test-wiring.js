@@ -70,7 +70,7 @@ WIRING.forEach(function (entry) {
 // 3. 新增 UI 元素 id：HTML 里定义一次 + JS 里 querySelector 至少一次
 const UI_IDS = ['bsrPaneSub', 'bsrPaneSearch', 'bsrSearchBtn', 'bsrSearchKw', 'bsrSearchResults',
   'bsrSearchStatus', 'bsrSearchPlatform', 'bsrSearchOrder', 'bsrSearchNative', 'bsrSearchMinPlay',
-  'bsrWeightBox', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
+  'bsrWeightBox', 'bsrWeightSliders', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
   'bsrAiTxt', 'bsrAnchor', 'bsrCorrect', 'bsrPolishOn', 'bsrHotwordsOn', 'bsrLlmCorrect',
   'bsrCustomHotwords', 'bsrYtKey', 'bsrYtEye'];
 UI_IDS.forEach(function (id) {
@@ -98,6 +98,25 @@ check('CHANGELOG 含当前版本 ' + version, version && changelog.indexOf(versi
 
 // 6. 热词降级逻辑在位（不支持 hotwords 的账号不能把转写搞挂）
 check('热词不支持时自动降级', /hotwordsFallbackDone/.test(SRC) && /已自动降级并关闭热词开关/.test(SRC));
+
+// 7. v9.3 权重滑块接线（拖滑块即时生效 + 与 JSON 双向同步 + 松手落盘）
+check('滑块按 WEIGHT_LABELS 渲染（不是写死的 HTML，新增权重自动多一项）',
+  /Object\.keys\(CandidateScorer\.WEIGHT_LABELS\)\.forEach/.test(SRC));
+check('滑块范围取自 WEIGHT_RANGE（与归一化截断边界同源，不货不对板）',
+  /CandidateScorer\.WEIGHT_RANGE\.min/.test(SRC) && /CandidateScorer\.WEIGHT_RANGE\.max/.test(SRC));
+check('滑块行带 data-w 键名（回刷时按键取值，不靠下标猜）', /data-w="' \+ key/.test(SRC));
+check('拖动过程刷数值并同步 JSON（input 事件，不落盘）',
+  /addEventListener\('input'/.test(SRC) && /syncSlidersToTextarea/.test(SRC));
+check('松手才落盘（change → persistWeightsFromSliders）',
+  /addEventListener\('change',\s*persistWeightsFromSliders\)/.test(SRC));
+check('落盘写的是同一个设置键并即时重渲染（保存后当前结果换档）',
+  /SETTINGS\.scoreWeights = root\.querySelector\('#bsrWeights'\)\.value;[\s\S]*?saveSettings\(\);[\s\S]*?render\(\);/.test(SRC));
+check('JSON 保存/恢复默认后滑块回刷（两边不打架）',
+  /#bsrWeightSave'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC)
+  && /#bsrWeightReset'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
+check('展开权重面板时滑块从当前设置回刷', /#bsrWeightToggle'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
+check('refreshWeightSliders 调用点足够（定义 + 展开/保存/重置/初始化 5 处）',
+  countOf('refreshWeightSliders') >= 6, '实际 ' + countOf('refreshWeightSliders') + ' 处');
 
 console.log('----------------------------------------');
 console.log(fail === 0 ? 'PASS ' + pass + '/' + (pass + fail) : 'FAIL ' + fail + ' 项（共 ' + (pass + fail) + '）');

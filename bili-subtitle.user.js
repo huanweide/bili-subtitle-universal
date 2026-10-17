@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.2.0
+// @version      9.3.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,10 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.3.0 权重滑块化：评分权重面板加 11 个滑块（拖动即时生效、松手落盘、与 JSON
+//       双向同步），标签表 WEIGHT_LABELS 与范围 WEIGHT_RANGE 收敛到模块单一事实源。
+// 9.2.0 接线版：v9.1 三个模块全量接进面板 UI（双 Tab / 评分卡 / 权重面板 / 热词注入 /
+//       字幕增强 / 双形态导出 / LLM 纠错），新增 53 项接线验证测试。
 // 9.1.0 搜索筛选 Tab（B站 wbi 搜索 + YouTube Data API）、可解释候选评分引擎（A/B/C 三档，
 //       权重设置面板可调）、转写质量三层提升（热词注入免费 / LLM 纠错付费默认关 /
 //       标点+断句+相邻去重默认开）、双形态导出、ASR 退避重试与失败进度上报。
@@ -58,6 +62,26 @@
       coinLikeRatio: 10,
       excludeKeyword: -36
     };
+  
+    // 滑块面板的中文标签与取值范围。新增权重键时这里必须同步加一项：
+    // 滑块面板按这两个表渲染，漏加标签 = 该项在面板里静默消失（非技术用户根本
+    // 不知道能调它）。test-scorer 有断言钉死「标签键集合 === 默认权重键集合」。
+    var WEIGHT_LABELS = {
+      nativeSubtitle: '有原生字幕（免 ASR）',
+      noNativeSubtitle: '无原生字幕（要 ASR）',
+      subtitleUnknown: '字幕状态未知',
+      durationIdeal: '时长 8–60 分钟',
+      durationTooShort: '时长不足 3 分钟',
+      durationTooLong: '时长超过 2 小时',
+      knowledgeCategory: '知识类分区',
+      knowledgeKeyword: '标题含知识词',
+      favoriteLikeRatio: '收藏/点赞比',
+      coinLikeRatio: '投币/点赞比',
+      excludeKeyword: '标题含排除词'
+    };
+    // 与 normalizeWeights 的 clamp(-100, 100) 保持一致：滑块到头就是截断边界，
+    // 不会出现「拖到 150 被静默截回 100」的货不对板。
+    var WEIGHT_RANGE = { min: -100, max: 100 };
   
     var KNOWLEDGE_CATEGORY_RE = /(知识|科技|科普|校园|学习|教育|职场|计算机|编程|数码|财经|商业|公开课|讲座)/i;
     var KNOWLEDGE_TITLE_RE = /(教程|讲解|保姆级|从零|入门|原理|拆解|复盘|一文讲透|how\s+to|explained|deep\s+dive|crash\s+course)/i;
@@ -160,6 +184,8 @@
   
     return {
       DEFAULT_WEIGHTS: Object.assign({}, DEFAULT_WEIGHTS),
+      WEIGHT_LABELS: Object.assign({}, WEIGHT_LABELS),
+      WEIGHT_RANGE: { min: WEIGHT_RANGE.min, max: WEIGHT_RANGE.max },
       normalizeWeights: normalizeWeights,
       scoreCandidate: scoreCandidate
     };
@@ -2818,6 +2844,11 @@
       '.bsr-wbox{display:none;border:1px dashed #ddd;border-radius:8px;padding:8px;margin-top:8px}' +
       '.bsr-wbox.show{display:block}' +
       '.bsr-wbox textarea{width:100%;box-sizing:border-box;height:88px;font-size:10px;font-family:monospace;border:1px solid #eee;border-radius:6px;padding:6px}' +
+      '.bsr-wtip{font-size:10px;color:#888;line-height:1.6;margin-bottom:6px}' +
+      '.bsr-wrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:11px}' +
+      '.bsr-wrow label{flex:none;width:120px;color:#555;cursor:pointer;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-wrow input[type=range]{flex:1;min-width:0;height:16px;accent-color:#7C5CBF;cursor:pointer}' +
+      '.bsr-wval{flex:none;width:36px;text-align:right;font-family:monospace;font-size:11px;color:#FB7299}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-keywrap{position:relative}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
@@ -2900,7 +2931,8 @@
       '      <div id="bsrSearchResults"></div>' +
       '      <div class="bsr-set" id="bsrWeightToggle">⚖ 评分权重（A/B/C 档怎么算）</div>' +
       '      <div class="bsr-wbox" id="bsrWeightBox">' +
-      '        <div style="font-size:10px;color:#888;line-height:1.6;margin-bottom:6px">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。有原生字幕 +42 / 无字幕 −38（ASR 要花钱还慢）；时长 5–40 分钟 +14；知识类分区 +16。JSON 可直接编辑，留空 = 恢复默认。</div>' +
+      '        <div class="bsr-wtip">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。拖滑块即时生效（松手即保存）；下面 JSON 是高级编辑，两边始终保持同步，清空 JSON 保存 = 恢复默认。</div>' +
+      '        <div id="bsrWeightSliders"></div>' +
       '        <textarea id="bsrWeights" spellcheck="false"></textarea>' +
       '        <div class="bsr-row" style="margin-top:6px">' +
       '          <button class="bsr-btn bsr-s" id="bsrWeightSave" style="flex:1">保存权重</button>' +
@@ -3069,20 +3101,84 @@
     root.querySelector('#bsrSearchMinPlay').onchange = function (e) { search.minPlay = Number(e.target.value) || 0; };
     root.querySelector('#bsrSearchKw').onkeydown = function (e) { if (e.key === 'Enter') runSearch(); };
     root.querySelector('#bsrSearchBtn').onclick = function () { search.keyword = root.querySelector('#bsrSearchKw').value; runSearch(); };
-    root.querySelector('#bsrWeightToggle').onclick = function () { root.querySelector('#bsrWeightBox').classList.toggle('show'); };
+    // ---- v9.3 权重滑块：拖动即时生效，与 JSON 双向同步 ----
+    function currentWeightMap() {
+      // 为什么单独包一层：SETTINGS.scoreWeights 是 JSON 字符串，可能是用户手改坏的，
+      // 解析失败时滑块不能白屏，退回默认值（与 normalizeWeights 的容错口径一致）。
+      if (!SETTINGS.scoreWeights) return CandidateScorer.normalizeWeights(null);
+      try { return CandidateScorer.normalizeWeights(JSON.parse(SETTINGS.scoreWeights)); }
+      catch (e) { return CandidateScorer.normalizeWeights(null); }
+    }
+    function weightSlidersBuilt() { return !!root.querySelector('#bsrWeightSliders .bsr-wrow'); }
+    function buildWeightSliders() {
+      var box = root.querySelector('#bsrWeightSliders');
+      if (!box || weightSlidersBuilt()) return;
+      var w = currentWeightMap();
+      var html = '';
+      // 滑块按 WEIGHT_LABELS 渲染：标签表与默认权重键集合由 test-scorer 断言保持一致，
+      // 新增权重键忘了加标签会直接测试红，不会静默少一项。
+      Object.keys(CandidateScorer.WEIGHT_LABELS).forEach(function (key) {
+        html += '<div class="bsr-wrow" data-w="' + key + '">' +
+          '<label>' + CandidateScorer.WEIGHT_LABELS[key] + '</label>' +
+          '<input type="range" min="' + CandidateScorer.WEIGHT_RANGE.min + '" max="' + CandidateScorer.WEIGHT_RANGE.max + '" step="1" value="' + w[key] + '" />' +
+          '<span class="bsr-wval">' + (w[key] > 0 ? '+' : '') + w[key] + '</span>' +
+          '</div>';
+      });
+      box.innerHTML = html;
+      Array.prototype.forEach.call(box.querySelectorAll('input[type=range]'), function (inp) {
+        // input 只刷界面：拖动过程每像素都落盘会打爆 GM_setValue；change 才是松手，才保存
+        inp.addEventListener('input', function () {
+          var v = Number(inp.value) || 0;
+          inp.closest('.bsr-wrow').querySelector('.bsr-wval').textContent = (v > 0 ? '+' : '') + v;
+          syncSlidersToTextarea();
+        });
+        inp.addEventListener('change', persistWeightsFromSliders);
+      });
+    }
+    function refreshWeightSliders() {
+      if (!weightSlidersBuilt()) { buildWeightSliders(); return; }
+      var w = currentWeightMap();
+      Array.prototype.forEach.call(root.querySelectorAll('#bsrWeightSliders .bsr-wrow'), function (row) {
+        var v = w[row.getAttribute('data-w')];
+        row.querySelector('input[type=range]').value = v;
+        row.querySelector('.bsr-wval').textContent = (v > 0 ? '+' : '') + v;
+      });
+    }
+    function syncSlidersToTextarea() {
+      var map = {};
+      Array.prototype.forEach.call(root.querySelectorAll('#bsrWeightSliders .bsr-wrow'), function (row) {
+        map[row.getAttribute('data-w')] = Number(row.querySelector('input[type=range]').value) || 0;
+      });
+      root.querySelector('#bsrWeights').value = JSON.stringify(CandidateScorer.normalizeWeights(map), null, 1);
+    }
+    function persistWeightsFromSliders() {
+      syncSlidersToTextarea();
+      SETTINGS.scoreWeights = root.querySelector('#bsrWeights').value;
+      saveSettings();
+      render();   // 当前搜索结果即时换档，不用重新搜索
+      toast('权重已保存，即时生效');
+    }
+    root.querySelector('#bsrWeightToggle').onclick = function () {
+      root.querySelector('#bsrWeightBox').classList.toggle('show');
+      refreshWeightSliders();   // 每次展开都从当前设置回刷：用户可能刚在别处改过 JSON
+    };
     root.querySelector('#bsrWeightSave').onclick = function () {
       var raw = root.querySelector('#bsrWeights').value.trim();
-      if (!raw) { SETTINGS.scoreWeights = ''; saveSettings(); toast('已恢复默认权重'); return; }
+      if (!raw) { SETTINGS.scoreWeights = ''; saveSettings(); refreshWeightSliders(); render(); toast('已恢复默认权重'); return; }
       try {
         var parsed = JSON.parse(raw);
         CandidateScorer.normalizeWeights(parsed);   // 校验：非法权重直接抛，不进设置
         SETTINGS.scoreWeights = raw; saveSettings();
-        toast('权重已保存，下次搜索生效');
+        refreshWeightSliders();   // JSON 保存后滑块跟上，两边不打架
+        render();
+        toast('权重已保存，即时生效');
       } catch (e) { toast('权重 JSON 无效：' + e.message); }
     };
     root.querySelector('#bsrWeightReset').onclick = function () {
       SETTINGS.scoreWeights = ''; saveSettings();
       root.querySelector('#bsrWeights').value = JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
+      refreshWeightSliders();
+      render();
       toast('已恢复默认权重');
     };
     // ---- v9.2 双形态导出 + LLM 纠错 ----
@@ -3121,6 +3217,7 @@
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
     root.querySelector('#bsrSearchMinPlay').value = String(search.minPlay);
     root.querySelector('#bsrWeights').value = SETTINGS.scoreWeights || JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
+    refreshWeightSliders();   // 面板初始化就建好滑块（隐藏态建 DOM 无副作用），展开即时可用
     root.querySelector('#bsrYtEye').onclick = function () {
       var k = root.querySelector('#bsrYtKey');
       k.type = (k.type === 'password') ? 'text' : 'password';

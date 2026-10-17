@@ -5,7 +5,7 @@
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
 [![version](https://img.shields.io/badge/version-9.2.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-147%2F147-3a8ee6)](tests/run-tests.js)
+[![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
 
 ---
@@ -36,7 +36,7 @@
 | **先筛后转，不花冤枉钱** | v9.1 设计、v9.2 接线的搜索 Tab：出候选 → 逐条探测有无原生字幕 → 可解释评分排 A/B/C 三档。点卡片先看每条加减分的理由，再决定打不打开 |
 | **转写稿三层变好用** | v9.1 设计、v9.2 接线：热词注入（免费，词来自视频自己的标题/简介/标签，账号不支持自动降级）+ 标点恢复 + 断句合并 + 相邻重复行去重；LLM 纠错按需开 |
 | **纯前端，密钥不出浏览器** | 没有服务器，你的 API Key 只存在 Tampermonkey 本地沙箱，不上传任何第三方 |
-| **有测试兜底** | 147 项 Node 断言（含 53 项「接线验证」：功能删了调用方测试就红）+ 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
+| **有测试兜底** | Node 单元测试 86 项 + 评分/质量 19 项 + 接线验证 53 项，合计 158 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**。
 
@@ -286,6 +286,7 @@ Google 的策略要求调用方自备 Data API Key，脚本不内置任何 Key�
 
 ## 路线图
 
+- ✅ **v9.0.1 · 字幕正确性（已完成）**：修掉 VTT 结束时间恒为 0（此前所有 YouTube 字幕导出的 SRT 结束时间都是 0）、SRT 纯数字正文被吞、VTT 不解码 HTML 实体；轨道名统一转义；新增文档一致性门禁。
 - ✅ **v9.0 · 分段解码（已完成）**：按分片目录逐片下载、逐片独立解码，内存恒定，完全不播放，时间戳用目录给的精确起点。
 - ✅ **v9.1 · 搜索筛选 + 转写质量三层（已完成）**：可解释的候选评分（A/B/C 三档、权重可调）、热词注入 / LLM 纠错 / 标点断句去重、双形态导出、ASR 退避重试。
 - ✅ **v9.2 · 接线版（已完成）**：v9.1 的三个模块此前只有定义没有调用方（界面无入口），本版全部接进面板 UI——双 Tab、评分卡片（点开理由再打开）、权重 JSON 面板、热词注入带自动降级、字幕增强幂等落定、AI 文本/锚点稿导出、LLM 纠错按钮；新增 53 项「接线验证」断言，删调用方即测试红。
@@ -299,9 +300,10 @@ Google 的策略要求调用方自备 Data API Key，脚本不内置任何 Key�
 ## 开发与测试
 
 ```bash
-node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化（75 项）
-node tests/test-scorer.js    # v9.1 新增：候选评分 / 搜索筛选纯函数 / 转写质量（去重 / 断句 / 锚点 / 纠错校验）（19 项）
-node tests/test-wiring.js    # v9.2 新增：接线验证——模块函数有调用方 / UI 元素两侧都在 / 设置有持久化 / 版本号对齐（53 项）
+node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化 / 字幕解析正确性（86 项）
+node tests/test-scorer.js    # v9.1 新增：候选评分 / 搜索筛选纯函数 / 转写质量（去重 / 断句 / 锚点 / 纠错校验），共 19 项断言
+node tests/test-wiring.js    # v9.2 新增：接线验证——模块函数有调用方 / UI 元素两侧都在 / 设置有持久化 / 版本号对齐，共 53 项断言
+node tests/check-docs.js     # 文档一致性门禁：README 的版本号/测试数必须和源码对得上（防手工改漏）
 node build.js                # 把 modules/*.js 同步进 bili-subtitle.user.js 的 build:modules 区
 node tests/serve.js          # 本地静态服务，端口 8765
 ```

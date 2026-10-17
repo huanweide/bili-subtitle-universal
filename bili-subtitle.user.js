@@ -2,7 +2,7 @@
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
 // @version      9.2.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -795,6 +795,12 @@
     ta.innerHTML = s;
     return ta.value;
   }
+  // 写进 innerHTML 的远程文本必须过这一层：字幕轨道名/语言名来自站点接口，不是我们自己写死的字面量
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
 
   // 语言排序：人工字幕 > AI 字幕；中文优先，其次英文/日文/韩文...
   var LANG_ORDER = ['zh-CN', 'zh', 'zh-Hans', 'zh-Hant', 'yue', 'en', 'ja', 'ko', 'es', 'pt', 'ar', 'th', 'vi', 'fr', 'de', 'ru', 'it', 'id', 'ms', 'hi'];
@@ -1006,22 +1012,34 @@
   }
 
   // ===================== 字幕解析器（通用） =====================
+  // 实体解码：SRT/VTT/TTML 都可能带 &amp; &lt; &#39; 等，不解码会把转义符原样写进导出的字幕里
+  function unescapeEntities(s) {
+    return String(s == null ? '' : s)
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&#(\d+);/g, function (_, d) { return String.fromCharCode(+d); })
+      .replace(/&#x([0-9a-fA-F]+);/g, function (_, h) { return String.fromCharCode(parseInt(h, 16)); })
+      .replace(/&amp;/g, '&'); // &amp; 必须最后解，否则会二次解码出伪造的标签
+  }
+
+  var SRT_TS = /(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})/;
   function parseSrt(text) {
     var out = [];
-    var blocks = String(text).split(/\r?\n\r?\n/);
-    for (var i = 0; i < blocks.length; i++) {
-      var b = blocks[i].trim();
-      if (!b) continue;
-      var lines = b.split(/\r?\n/);
-      var m = null, j;
-      for (j = 0; j < lines.length; j++) {
-        m = lines[j].match(/(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})/);
-        if (m) break;
-      }
-      if (!m) continue;
+    // 以时间戳行为锚点切条，而不是靠空行：缺空行的 SRT 会把整段粘成一条
+    var lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+    var idxs = [], i;
+    for (i = 0; i < lines.length; i++) if (SRT_TS.test(lines[i])) idxs.push(i);
+    for (var n = 0; n < idxs.length; n++) {
+      var li = idxs[n];
+      var m = lines[li].match(SRT_TS);
       var from = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;
       var to = (+m[5]) * 3600 + (+m[6]) * 60 + (+m[7]) + (+m[8]) / 1000;
-      var content = lines.slice(j + 1).filter(function (l) { return l && !/^\d+$/.test(l.trim()); }).join('\n').trim();
+      var end = (n + 1 < idxs.length) ? idxs[n + 1] : lines.length;
+      var seg = lines.slice(li + 1, end);
+      // 只弹掉紧贴下一条时间戳的「序号行」；正文本身就是数字（年份、编号）时必须保住
+      while (seg.length > 1 && /^\d+$/.test(seg[seg.length - 1].trim())) seg.pop();
+      var content = unescapeEntities(seg.join('\n')).trim();
       if (content) out.push({ from: from, to: to, content: content });
     }
     return out;
@@ -1040,10 +1058,18 @@
     var out = [];
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
+      // NOTE / STYLE / REGION 块整块跳过：块内出现 --> 也不能当成字幕
+      if (/^(NOTE|STYLE|REGION)\s/.test(line) || line === 'NOTE' || line === 'STYLE' || line === 'REGION') {
+        while (i + 1 < lines.length && lines[i + 1].trim() !== '') i++;
+        continue;
+      }
       var arrow = line.indexOf('-->');
       if (arrow < 0) continue;
       var from = vttTime(line.slice(0, arrow));
-      var to = vttTime(line.slice(arrow + 3).split(/\s/)[0]);
+      // 关键：箭头右侧必须先 trim 再取第一段，否则取到的是空串，结束时间恒为 0
+      var tail = line.slice(arrow + 3).trim().split(/\s+/)[0] || '';
+      var to = vttTime(tail);
+      if (!(to > 0)) to = from + 2; // 拿不到结束时间就给个 2 秒兜底，绝不写 0
       var content = [];
       var j = i + 1;
       while (j < lines.length && lines[j].trim() !== '') {
@@ -1051,7 +1077,7 @@
         j++;
       }
       i = j;
-      var txt = content.join('\n').trim();
+      var txt = unescapeEntities(content.join('\n')).trim();
       if (txt) out.push({ from: from, to: to, content: txt });
     }
     return out;
@@ -1060,6 +1086,9 @@
     s = String(s == null ? '' : s).trim();
     var m = s.match(/^(\d+):(\d{1,2}):(\d{1,2}(?:[.,]\d+)?)$/);
     if (m) return (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3].replace(',', '.'));
+    // MM:SS 形态（少了小时位）：旧版 parseFloat 会把 "1:02" 读成 1 秒，正确应是 62 秒
+    var m2 = s.match(/^(\d{1,2}):(\d{1,2}(?:[.,]\d+)?)$/);
+    if (m2) return (+m2[1]) * 60 + parseFloat(m2[2].replace(',', '.'));
     var f = parseFloat(s);
     return isFinite(f) ? f : 0;
   }
@@ -1078,12 +1107,9 @@
         var to;
         if (end != null) to = ttmlTime(end);
         else to = from + (dur != null ? parseFloat(dur) : 1);
-        var content = m[3]
+        var content = unescapeEntities(m[3]
           .replace(/<br\s*\/?>/gi, '\n')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
-          .replace(/&nbsp;/g, ' ')
+          .replace(/<[^>]+>/g, ''))
           .split('\n').map(function (l) { return l.trim(); }).join('\n')
           .trim();
         if (content) out.push({ from: from, to: to, content: content });
@@ -3182,7 +3208,7 @@
       if (a.preview && a.preview.length) {
         live.style.display = 'block';
         live.innerHTML = a.preview.map(function (s) {
-          return '<span class="t">[' + fmtDur(s.from) + ']</span> ' + String(s.content || '').replace(/</g, '&lt;');
+          return '<span class="t">[' + fmtDur(s.from) + ']</span> ' + escHtml(String(s.content || ''));
         }).join('\n');
         live.scrollTop = live.scrollHeight;
       } else live.style.display = 'none';
@@ -3216,7 +3242,7 @@
     if (state.subs.length) {
       lanRow.style.display = 'flex';
       sel.innerHTML = state.subs.map(function (s) {
-        return '<option value="' + s.lan + '"' + (s.lan === state.lan ? ' selected' : '') + '>' + (s.lan_doc || s.lan) + ' (' + s.lan + ')' + (s.urls.length > 1 ? ' ×' + s.urls.length + '段' : '') + (s.ai ? ' AI' : '') + '</option>';
+        return '<option value="' + escHtml(s.lan) + '"' + (s.lan === state.lan ? ' selected' : '') + '>' + escHtml(s.lan_doc || s.lan) + ' (' + escHtml(s.lan) + ')' + (s.urls.length > 1 ? ' ×' + s.urls.length + '段' : '') + (s.ai ? ' AI' : '') + '</option>';
       }).join('');
     } else lanRow.style.display = 'none';
     $('#bsrOps').style.display = 'flex';

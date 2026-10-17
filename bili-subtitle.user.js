@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.3.0
+// @version      9.4.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -32,6 +32,9 @@
 // ==/UserScript==
 
 // 版本历史（详见 CHANGELOG.md）：
+// 9.4.0 分段转写断点续传：每批（约 2 分钟音频）完成即把「已完成批数 + 已转文字」
+//       落进本地存储，刷新页面/误关标签/网络中断后重转自动跳过已完成部分；断点
+//       24h 有效、按 BV 号 + P 号 + 音频地址识别；「↺ 重新开始」可放弃旧进度。
 // 9.3.0 权重滑块化：评分权重面板加 11 个滑块（拖动即时生效、松手落盘、与 JSON
 //       双向同步），标签表 WEIGHT_LABELS 与范围 WEIGHT_RANGE 收敛到模块单一事实源。
 // 9.2.0 接线版：v9.1 三个模块全量接进面板 UI（双 Tab / 评分卡 / 权重面板 / 热词注入 /
@@ -742,6 +745,93 @@
     };
   }
   var TranscriptQuality = createTranscriptQualityModule();
+  /**
+   * 分段转写断点续传的状态层（v9.4）。
+   *
+   * 背景：3 小时长视频走分段解码，一批约 2 分钟音频，全程上百批。断网、误关标签页、
+   * 主动取消后重来一遍 = 重新花钱花时间。这里把「已完成到第几批 + 已转出的文字」
+   * 落进 GM 存储，同一条视频（bvid + cid + 音频地址）下次自动接着跑。
+   *
+   * 设计约束：
+   * 1. 纯函数，GM_setValue / GM_getValue 由调用方注入——Node 里能完整测试，
+   *    不碰浏览器存储。
+   * 2. 一切从磁盘读回来的东西都按脏数据对待：JSON 坏、字段缺、形状不对、
+   *    超 24 小时、换了一条视频——一律当没有断点，绝不把脏数据带进字幕。
+   * 3. 存储键只有一个（bsr_seg_resume），值里自带视频标识，不搞键空间膨胀。
+   */
+  function createSegResumeModule() {
+    var KEY = 'bsr_seg_resume';
+    var TTL_MS = 24 * 3600 * 1000;        // 断点只保留 24 小时：B 站音频地址带签名会过期，续太久的断点没有意义
+    var MAX_BYTES = 3 * 1024 * 1024;      // 3MB 上限：3 小时中文转写约 250KB，这个坎永远摸不到，纯防御
+  
+    function normCid(cid) { return cid == null ? '' : String(cid); }
+  
+    // 同一条视频的判定：bvid + cid + 音频地址三者全同。音频地址里带签名参数，
+    // 地址变了说明是重新取的流，旧断点的字节偏移全部作废，必须整体重来。
+    function sameRun(st, bvid, cid, url) {
+      return !!st && st.bvid === (bvid || '') && normCid(st.cid) === normCid(cid) && st.url === (url || '');
+    }
+  
+    function sanitizeSegs(raw) {
+      if (!Array.isArray(raw)) return [];
+      var out = [];
+      for (var i = 0; i < raw.length; i++) {
+        var x = raw[i];
+        if (!x || typeof x.content !== 'string' || !x.content) continue;
+        var from = Number(x.from), to = Number(x.to);
+        if (!isFinite(from) || !isFinite(to)) continue;
+        out.push({ from: from, to: to, content: x.content });
+      }
+      return out;
+    }
+  
+    /**
+     * 读断点。返回 null = 没有可用断点（全新开始）；
+     * 返回 { doneCount, segs } = 前 doneCount 批已完成，segs 是已转出的文字。
+     */
+    function loadResume(getValue, now, bvid, cid, url) {
+      var raw = getValue(KEY, '');
+      if (!raw || typeof raw !== 'string') return null;
+      var st = null;
+      try { st = JSON.parse(raw); } catch (e) { return null; }   // 存储被写坏：当没有
+      if (!st || typeof st !== 'object') return null;
+      // 时钟回拨（now < t）同样视为过期，不跟用户时钟较劲
+      if (!(now - (Number(st.t) || 0) >= 0 && now - (Number(st.t) || 0) < TTL_MS)) return null;
+      if (!sameRun(st, bvid, cid, url)) return null;
+      var done = Number(st.doneCount);
+      if (!isFinite(done) || done < 0) return null;
+      return { doneCount: Math.floor(done), segs: sanitizeSegs(st.segs) };
+    }
+  
+    /**
+     * 写断点。返回 false = 超限没写（调用方应记一笔，不能让用户以为存上了）。
+     */
+    function saveResume(setValue, now, bvid, cid, url, doneCount, segs) {
+      var st = {
+        t: now,
+        bvid: bvid || '',
+        cid: normCid(cid),
+        url: url || '',
+        doneCount: Math.max(0, Math.floor(Number(doneCount) || 0)),
+        segs: sanitizeSegs(segs)
+      };
+      var raw = JSON.stringify(st);
+      if (raw.length > MAX_BYTES) return false;
+      setValue(KEY, raw);
+      return true;
+    }
+  
+    function clearResume(setValue) { setValue(KEY, ''); }
+  
+    return {
+      KEY: KEY,
+      TTL_MS: TTL_MS,
+      loadResume: loadResume,
+      saveResume: saveResume,
+      clearResume: clearResume
+    };
+  }
+  var SegResume = createSegResumeModule();
   // </build:modules>
 
   // ===================== 状态 =====================
@@ -2057,11 +2147,24 @@
 
     state.asr.stage = 'transcribe';
     state.asr.total = batches.length;
-    state.asr.done = 0;
-    state.asr.chunks = batches.map(function (b) { return { i: 0, start: b.startSec, state: 'queued' }; });
+    // v9.4 断点续传：同一条视频（bvid + cid + 音频地址）24 小时内的断点直接接着跑。
+    // 读存储按脏数据对待（校验全在 SegResume 模块里），这里再包一层 try——
+    // 存储 API 本身出问题也不能挡住转写，大不了从头来。
+    var resume = null;
+    try {
+      resume = SegResume.loadResume(GM_getValue, Date.now(), state.bvid || '', state.cid, url);
+    } catch (eR) { resume = null; }
+    var doneCount = resume ? Math.min(resume.doneCount, batches.length) : 0;
+    var segsAll = resume ? resume.segs : [];
+    if (doneCount > 0) {
+      log('断点续传：跳过已完成的 ' + doneCount + '/' + batches.length + ' 批，从第 ' + (doneCount + 1) + ' 批继续（想全部重来可点「↺ 重新开始」）');
+    }
+    state.asr.resumed = doneCount > 0;
+    state.asr.resumeTip = doneCount > 0 ? ('已从断点继续：前 ' + doneCount + '/' + batches.length + ' 批沿用上次转写结果') : '';
+    state.asr.done = doneCount;
+    state.asr.chunks = batches.map(function (b, bi) { return { i: 0, start: b.startSec, state: bi < doneCount ? 'done' : 'queued' }; });
+    state.asr.preview = segsAll.slice(-40);
     render();
-
-    var segsAll = [];
 
     // 并发下载一批分片
     async function fetchBatch(items) {
@@ -2079,7 +2182,7 @@
       return out;
     }
 
-    for (var bi = 0; bi < batches.length; bi++) {
+    for (var bi = doneCount; bi < batches.length; bi++) {
       if (asrStop(myGen)) break;
       var b = batches[bi];
       if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'working';
@@ -2107,6 +2210,9 @@
       if (!decoded.length) {
         if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'fail';
         state.asr.done = bi + 1;
+        // v9.4：整批解码全失败，不把这批记成「已完成」——下次续传重试这批。
+        // 否则一个网络抖动就会在 3 小时稿子里留下永久缺口，而用户毫无知觉。
+        try { SegResume.saveResume(GM_setValue, Date.now(), state.bvid || '', state.cid, url, bi, segsAll); } catch (eW) {}
         render();
         continue;
       }
@@ -2123,9 +2229,23 @@
       if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'done';
       state.asr.done = bi + 1;
       state.asr.preview = segsAll.slice(-40);
+      // v9.4：每批完成即落盘。增长式数组每批全量写一次（3 小时约百批、终稿约
+      // 250KB，总量可接受），换来的是任何时刻中断都不丢已完成部分。
+      // 空批（纯音乐段）也算已完成——没有内容可重做。
+      try {
+        if (!SegResume.saveResume(GM_setValue, Date.now(), state.bvid || '', state.cid, url, bi + 1, segsAll)) {
+          log('断点数据超过大小上限，本轮不再保存断点（不影响本次转写）');
+        }
+      } catch (eW) { log('断点保存失败（不影响本次转写）', eW); }
       render();
     }
 
+    // 只有整轮跑完才清断点。用户主动取消走的是 asrStop break，到不了这个判断，
+    // 断点原样保留——那正是续传存在的意义。留一个「全部完成」的 stale 断点没有
+    // 价值，还会让下次误判为可续传。
+    if (!asrStop(myGen)) {
+      try { SegResume.clearResume(GM_setValue); } catch (eC) {}
+    }
     if (segsAll.length && state.asr) state.asr.progress = 100;
     return segsAll;
   }
@@ -2885,6 +3005,10 @@
       '      <div class="bsr-meta" id="bsrMeta"></div>' +
       '      <div class="bsr-live" id="bsrLive" style="display:none"></div>' +
       '      <div class="bsr-chunks" id="bsrChunks"></div>' +
+      '      <div class="bsr-row" id="bsrResumeRow" style="display:none;margin-top:6px;font-size:11px;color:#888;align-items:center">' +
+      '        <span id="bsrResumeTip">已从断点继续</span>' +
+      '        <button class="bsr-btn bsr-cancel" id="bsrAsrRestart" style="flex:none;margin-left:auto;font-size:11px;padding:3px 8px" title="放弃磁盘保存的已完成批次，从第 1 批重新开始（当前正在转写的那批结果会丢弃，已花的额度不退）">↺ 重新开始</button>' +
+      '      </div>' +
       '    </div>' +
       '    <textarea class="bsr-ta" id="bsrOut" readonly placeholder="点击「获取字幕」后，字幕文字将显示在这里"></textarea>' +
       '    <div class="bsr-ops" id="bsrOps" style="display:none">' +
@@ -3046,6 +3170,15 @@
     root.querySelector('#bsrLan').onchange = function (e) { switchLan(e.target.value); };
     root.querySelector('#bsrCancel').onclick = function () { if (state.asr) state.asr.cancel = true; };
     root.querySelector('#bsrAsrBtn').onclick = function () { runAsr(); };
+    // v9.4 断点续传的「重新开始」：清磁盘断点 + 作废当前轮次 + 重启 ASR。
+    // asrGen++ 让旧轮次的每处 asrStop 陆续退场（不会污染新轮次的状态）；
+    // 音频 blob 已缓存不重下，断点已清，从第 1 批跑起。
+    root.querySelector('#bsrAsrRestart').onclick = function () {
+      try { SegResume.clearResume(GM_setValue); } catch (e) {}
+      asrGen++;
+      toast('已放弃旧进度，从第 1 批重新开始');
+      runAsr();
+    };
     root.querySelector('#bsrUnlock').onclick = function () {
       var a = recRef.audio;
       if (!a) return;
@@ -3333,6 +3466,13 @@
       box.style.display = 'none';
       mini.style.display = 'none';
       $('#bsr-fab').style.display = 'block';
+    }
+    // v9.4 断点续传提示行：只在「本轮是从磁盘断点继续的」时出现，附「重新开始」出口
+    var resumeRow = $('#bsrResumeRow');
+    if (resumeRow) {
+      var resuming = !!state.asr && !!state.asr.resumed;
+      resumeRow.style.display = resuming ? 'flex' : 'none';
+      if (resuming && state.asr.resumeTip) $('#bsrResumeTip').textContent = state.asr.resumeTip;
     }
     $('#bsrOut').value = state.body ? bodyToTxt(state.body) : (state.noSub ? getVideoInfoText() : '');
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');

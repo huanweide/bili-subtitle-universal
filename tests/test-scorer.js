@@ -21,11 +21,14 @@
  *   C. TranscriptQuality：相邻重复行去重（精确重复 / 部分重叠 / 包含 / 空行）/
  *      断句合并（2 秒碎片 → 15–40 字自然句）/ 章节锚点稿 / 热词来自视频自身元数据 /
  *      LLM 纠错响应的接受与拒绝
+ *  D. SegResume 断点续传状态层：读写往返 / 换视频即失效 / 24h TTL 与时钟回拨 /
+ *      脏数据消毒 / 清断点 / 超限不写
  */
 
 var CandidateScorer = require('../modules/candidate-scorer.js');
 var SearchFilter = require('../modules/search-filter.js');
 var TranscriptQuality = require('../modules/transcript-quality.js');
+var SegResume = require('../modules/seg-resume.js');
 
 // ---------- 迷你断言框架 ----------
 var passed = 0, failed = 0, current = '';
@@ -429,6 +432,99 @@ test('C7 buildCorrectionPrompt：约束文案 + 视频元数据都在 prompt 里
   ok(prompt.indexOf('视频标题甲') >= 0, 'prom 应带视频标题');
   ok(prompt.indexOf('待校对文字') >= 0, 'prompt 应带待校对字幕');
   ok(prompt.indexOf('"changes"' ) >= 0, '必须要求输出变更清单');
+});
+
+// ============================================================
+// D. SegResume 断点续传状态层（v9.4）：纯函数 + GM 注入
+// ============================================================
+
+// 迷你 GM 存储：注入给模块，Node 里完整模拟「写坏 / 过期 / 换视频」
+function fakeGM(initial) {
+  var store = initial || {};
+  return {
+    get: function (key, dft) { return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : dft; },
+    set: function (key, val) { store[key] = val; },
+    raw: store
+  };
+}
+var NOW = 1700000000000;
+var VID = { bvid: 'BV1xx411c7mD', cid: 12345, url: 'https://upos-sz-mirror.bilivideo.com/abc.mp4?sig=deadbeef' };
+var SEGS = [
+  { from: 0, to: 120, content: '第一句' },
+  { from: 120, to: 240, content: '第二句' }
+];
+
+test('D1 断点读写往返：同视频同 url 读回 doneCount 与 segs', function () {
+  var gm = fakeGM();
+  ok(SegResume.saveResume(gm.set, NOW, VID.bvid, VID.cid, VID.url, 7, SEGS), '保存应成功');
+  var r = SegResume.loadResume(gm.get, NOW, VID.bvid, VID.cid, VID.url);
+  ok(!!r, '同视频应读到断点');
+  eq(r.doneCount, 7, 'doneCount 应原样读回');
+  deepEq(r.segs, SEGS, 'segs 应原样读回');
+});
+
+test('D2 换视频 / 换 cid / 换 url 一律当没有断点（音频地址带签名，变了旧偏移全作废）', function () {
+  var gm = fakeGM();
+  SegResume.saveResume(gm.set, NOW, VID.bvid, VID.cid, VID.url, 7, SEGS);
+  ok(SegResume.loadResume(gm.get, NOW, 'BV OTHER', VID.cid, VID.url) === null, '换 bvid 必须读不到');
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, 999, VID.url) === null, '换 cid 必须读不到');
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, VID.cid, VID.url + '&x=1') === null, '换 url 必须读不到');
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, null, VID.url) === null, 'cid 丢失必须读不到');
+});
+
+test('D3 超 24 小时与时钟回拨都算过期', function () {
+  var gm = fakeGM();
+  SegResume.saveResume(gm.set, NOW, VID.bvid, VID.cid, VID.url, 3, SEGS);
+  ok(SegResume.loadResume(gm.get, NOW + SegResume.TTL_MS - 1, VID.bvid, VID.cid, VID.url) !== null, '临界的最后一秒仍有效');
+  ok(SegResume.loadResume(gm.get, NOW + SegResume.TTL_MS, VID.bvid, VID.cid, VID.url) === null, '满 24 小时必须过期');
+  ok(SegResume.loadResume(gm.get, NOW - 60000, VID.bvid, VID.cid, VID.url) === null, '时钟回拨必须算过期');
+});
+
+test('D4 脏数据不进场：JSON 坏 / 字段缺 / segs 形状错都被消毒或拒绝', function () {
+  var gm = fakeGM({ bsr_seg_resume: '{烂掉的JSON' });
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, VID.cid, VID.url) === null, 'JSON 烂当没有断点');
+  gm = fakeGM({ bsr_seg_resume: 'null' });
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, VID.cid, VID.url) === null, '存了 null 当没有断点');
+  // 形状对的脏 segs：缺 content / 缺时间 / content 非字符串——逐条清掉，保留好条目
+  var gm2 = fakeGM();
+  SegResume.saveResume(gm2.set, NOW, VID.bvid, VID.cid, VID.url, 2, SEGS);
+  var st = JSON.parse(gm2.raw.bsr_seg_resume);
+  st.segs = st.segs.concat([{ from: 1 }, { to: 2, content: '缺起点' }, { from: 1, to: 2, content: 42 }, null]);
+  gm2.set('bsr_seg_resume', JSON.stringify(st));
+  var r = SegResume.loadResume(gm2.get, NOW, VID.bvid, VID.cid, VID.url);
+  ok(!!r, '断点本身应仍可读');
+  eq(r.segs.length, 2, '坏条目应被清掉，只剩 2 条好条目');
+  r.segs.forEach(function (s) {
+    ok(typeof s.content === 'string' && isFinite(s.from) && isFinite(s.to), '消完毒的条目形状必须完整');
+  });
+  // doneCount 是负数 / 非数字：手改存储绕过 saveResume 的钳制，读侧必须拒绝
+  var gm3 = fakeGM();
+  var base = { t: NOW, bvid: VID.bvid, cid: String(VID.cid), url: VID.url, segs: SEGS };
+  gm3.set('bsr_seg_resume', JSON.stringify(Object.assign({}, base, { doneCount: -5 })));
+  ok(SegResume.loadResume(gm3.get, NOW, VID.bvid, VID.cid, VID.url) === null, '负 doneCount 必须拒绝');
+  gm3.set('bsr_seg_resume', JSON.stringify(Object.assign({}, base, { doneCount: 'abc' })));
+  ok(SegResume.loadResume(gm3.get, NOW, VID.bvid, VID.cid, VID.url) === null, '非数字 doneCount 必须拒绝');
+});
+
+test('D5 clearResume 后读回 null；doneCount 超大批数由调用方截断，模块不越权', function () {
+  var gm = fakeGM();
+  SegResume.saveResume(gm.set, NOW, VID.bvid, VID.cid, VID.url, 5, SEGS);
+  SegResume.clearResume(gm.set);
+  ok(SegResume.loadResume(gm.get, NOW, VID.bvid, VID.cid, VID.url) === null, '清完后必须读不到');
+  // 空 segs + doneCount 0：有效断点（调用方据此判断「没有可跳过的批」）
+  var gm2 = fakeGM();
+  SegResume.saveResume(gm2.set, NOW, VID.bvid, VID.cid, VID.url, 0, []);
+  var r0 = SegResume.loadResume(gm2.get, NOW, VID.bvid, VID.cid, VID.url);
+  ok(!!r0 && r0.doneCount === 0 && r0.segs.length === 0, 'doneCount 0 是有效断点');
+});
+
+test('D6 超 3MB 不写并返回 false（调用方记一笔，不能让用户以为存上了）', function () {
+  var gm = fakeGM();
+  var huge = [];
+  for (var i = 0; i < 40000; i++) huge.push({ from: i, to: i + 1, content: 'x'.repeat(100) });
+  var okSaved = SegResume.saveResume(gm.set, NOW, VID.bvid, VID.cid, VID.url, 40000, huge);
+  ok(okSaved === false, '超限必须返回 false');
+  ok(gm.raw.bsr_seg_resume === undefined, '超限不得落盘');
 });
 
 // ---------- 汇总 ----------

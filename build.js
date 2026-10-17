@@ -8,7 +8,8 @@ const target = path.join(root, 'bili-subtitle.user.js');
 const modules = [
   { file: 'candidate-scorer.js', init: 'var CandidateScorer = createCandidateScorerModule();' },
   { file: 'search-filter.js', init: 'var SearchFilter = createSearchFilterModule();' },
-  { file: 'transcript-quality.js', init: 'var TranscriptQuality = createTranscriptQualityModule();' }
+  { file: 'transcript-quality.js', init: 'var TranscriptQuality = createTranscriptQualityModule();' },
+  { file: 'seg-resume.js', init: 'var SegResume = createSegResumeModule();' }
 ];
 
 function browserSource(file) {

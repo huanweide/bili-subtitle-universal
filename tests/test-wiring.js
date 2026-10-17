@@ -71,6 +71,7 @@ WIRING.forEach(function (entry) {
 const UI_IDS = ['bsrPaneSub', 'bsrPaneSearch', 'bsrSearchBtn', 'bsrSearchKw', 'bsrSearchResults',
   'bsrSearchStatus', 'bsrSearchPlatform', 'bsrSearchOrder', 'bsrSearchNative', 'bsrSearchMinPlay',
   'bsrWeightBox', 'bsrWeightSliders', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
+  'bsrResumeRow', 'bsrResumeTip', 'bsrAsrRestart',
   'bsrAiTxt', 'bsrAnchor', 'bsrCorrect', 'bsrPolishOn', 'bsrHotwordsOn', 'bsrLlmCorrect',
   'bsrCustomHotwords', 'bsrYtKey', 'bsrYtEye'];
 UI_IDS.forEach(function (id) {
@@ -117,6 +118,31 @@ check('JSON 保存/恢复默认后滑块回刷（两边不打架）',
 check('展开权重面板时滑块从当前设置回刷', /#bsrWeightToggle'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
 check('refreshWeightSliders 调用点足够（定义 + 展开/保存/重置/初始化 5 处）',
   countOf('refreshWeightSliders') >= 6, '实际 ' + countOf('refreshWeightSliders') + ' 处');
+
+// 8. v9.4 断点续传接线（SegResume 模块 + 分段路接入 + 「重新开始」出口）
+check('SegResume 已实例化', /var SegResume = createSegResumeModule\(\);/.test(SRC));
+['loadResume', 'saveResume', 'clearResume'].forEach(function (fn) {
+  var mod = moduleSource('seg-resume.js');
+  var defined = new RegExp('function ' + fn + '\\b').test(mod) && new RegExp(fn + '\\s*:').test(mod);
+  check('SegResume.' + fn + ' 有调用方', defined && countOf('SegResume.' + fn) >= 1,
+    '定义=' + defined + ' 调用次数=' + countOf('SegResume.' + fn));
+});
+check('读断点带全视频标识（bvid + cid + url，少一个就对不上断点）',
+  /SegResume\.loadResume\(GM_getValue, Date\.now\(\), state\.bvid \|\| '', state\.cid, url\)/.test(SRC));
+check('读存储整体包 try（存储 API 出问题不挡住转写，大不了从头来）',
+  /try \{[\s\S]{0,80}resume = SegResume\.loadResume/.test(SRC));
+check('续传从断点批开始（for 起点是 doneCount，不是 0）',
+  /for \(var bi = doneCount; bi < batches\.length; bi\+\+\)/.test(SRC));
+check('每批完成即落盘（成功路径 + 失败路径共 2 处，中断才不丢）',
+  countOf('SegResume.saveResume') >= 2, '实际 ' + countOf('SegResume.saveResume') + ' 处');
+check('整批解码全失败不记 done（下次续传重试该批，不留永久缺口）',
+  /SegResume\.saveResume\(GM_setValue, Date\.now\(\), state\.bvid \|\| '', state\.cid, url, bi, segsAll\)/.test(SRC));
+check('整轮跑完才清断点，且清断点挂在「未取消」条件下（取消不清——断点就是为中断准备的）',
+  /if \(!asrStop\(myGen\)\) \{\s+try \{ SegResume\.clearResume\(GM_setValue\); \}/.test(SRC));
+check('「↺ 重新开始」清断点 + 作废旧轮次（asrGen++）+ 重启 ASR',
+  /#bsrAsrRestart'\)\.onclick[\s\S]*?SegResume\.clearResume[\s\S]*?asrGen\+\+[\s\S]*?runAsr\(\)/.test(SRC));
+check('断点提示行随 state.asr.resumed 显隐（render 里管，不是建完就不管）',
+  /state\.asr\.resumed/.test(SRC) && /resumeRow\.style\.display = resuming/.test(SRC));
 
 console.log('----------------------------------------');
 console.log(fail === 0 ? 'PASS ' + pass + '/' + (pass + fail) : 'FAIL ' + fail + ' 项（共 ' + (pass + fail) + '）');

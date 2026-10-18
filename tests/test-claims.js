@@ -77,13 +77,10 @@ claim('失败批不计完成（下次重试）', has('saveResume\\(GM_setValue, 
 claim('B 站搜索免 Key（走 wbi 签名）', has('searchBilibili') && has('wbi'));
 claim('YouTube 搜索用自备 Data API Key（不内置任何 Key）', has('bsr_yt_key') && !/AIza[0-9A-Za-z_-]{20,}/.test(SRC));
 claim('逐条探测候选有无原生字幕', has('探测') && has('nativeSub|hasSub|subtitle'));
-claim('A/B/C 三档分数线', has("total >= 55 \\? 'A' : \\(total >= 25 \\? 'B' : 'C'\\)"));
-claim('每条分数可解释（带 signal / weight / detail）', has('reasons') && has('detail'));
-claim('三档预设一键切换', has('WEIGHT_PRESETS') && has('applyWeightPreset'));
-claim('权重滑块拖动即时生效', has('bsr-wrow') && has('refreshWeightSliders'));
-claim('拖过滑块如实标「自定义」', has('matchPreset') && has('自定义'));
+claim('结果用徽章标出有字幕 / 无字幕·需转写', has('bsr-sub yes') && has('无字幕·需转写'));
+claim('排序有字幕优先、其次播放量', has('bn - an'));
 claim('判字幕逐条请求有节流（降 412 概率）', has('randomDelayMs'));
-claim('点卡片第一次看理由、第二次才打开', has('expanded'));
+claim('点卡片直接打开视频（不再二次点击看理由）', has('openCandidate'));
 
 // ===================== 六、转写质量三层 =====================
 
@@ -108,6 +105,7 @@ claim('可选翻译（目标语言 × 模型）', has('translateTo') && has('tra
 
 claim('锚点/追踪参数不误伤（按视频身份比较）', has('RouteIdentity\\.isSameVideo'));
 claim('换分 P 自动重新获取字幕', has('autoFetchOnPageSwitch'));
+claim('进入视频自动获取字幕并复制（默认关，开启即自动取+复制）', has("bsr_auto_fetch', false") && has('scheduleAutoFetch'));
 claim('导出默认只复制不落文件', has("exportMode: GM_getValue\\('bsr_export_mode', 'copy'\\)"));
 claim('深色模式（跟随系统 + 手动切）', has('data-theme') && has('prefers-color-scheme: dark'));
 claim('FAB 带可见文字', has('<span class="lb">字幕</span>'));
@@ -117,6 +115,7 @@ claim('页面形态认领表（含 iframe 嵌入播放器）',
   has('SiteMatch\\.detect') && has("form: 'embed'") && has('player\\\\.bilibili'));
 claim('快捷键（输入框内不抢键）', has('hotkeysOn') && has("tagName === 'INPUT'"));
 claim('点击字幕行跳到视频对应时间（同类脚本标配，默认开可关）', has('seekTo') && has('clickSeekOn'));
+claim('字幕改可点击行列表（命中行高亮让跳转有意义）', has('bsr-line') && has('renderLines'));
 claim('Markdown 导出', has('SubExport\\.bodyToMd') && has("\\.md'"));
 claim('AI 总结提示词一键复制（提示词 + 稿子一起复制）', has('AI_PROMPTS') && has('buildPrompt'));
 claim('时间轴偏移校正（转写时间轴对不上可整体挪，不产生负时间戳）', has('shiftBody') && has('shiftSec'));

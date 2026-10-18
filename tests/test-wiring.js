@@ -83,16 +83,20 @@ WIRING.forEach(function (entry) {
   const mod = entry[0], fn = entry[1];
   const defined = new RegExp('function ' + fn + '\\b').test(moduleSource(MODULE_FILES[mod]))
     && new RegExp(fn + '\\s*:').test(moduleSource(MODULE_FILES[mod]));   // 导出清单里也有
-  const called = countOf(mod + '.' + fn) >= 1;
+  // 调用判定：① 主脚本里有「实例.函数」限定调用；② 或模块内（已内联进主脚本）
+  //    有真实调用（函数定义占 1 次，再加 ≥1 次调用 = 出现 ≥2 次）。
+  //    例：normalizeWeights 只在 scoreCandidate 内部被本地调用，没有 CandidateScorer. 前缀，
+  //    但确被使用，不应判为死代码。
+  const callRe = new RegExp('\\b' + fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\(', 'g');
+  const internalCalls = (SRC.match(callRe) || []).length >= 2;
+  const called = countOf(mod + '.' + fn) >= 1 || internalCalls;
   check(entry[2] + '（' + mod + '.' + fn + '）', defined && called,
-    '定义=' + defined + ' 调用次数=' + countOf(mod + '.' + fn));
+    '定义=' + defined + ' 调用次数=' + countOf(mod + '.' + fn) + ' 内部调用=' + internalCalls);
 });
 
 // 3. 新增 UI 元素 id：HTML 里定义一次 + JS 里 querySelector 至少一次
 const UI_IDS = ['bsrPaneSub', 'bsrPaneSearch', 'bsrSearchBtn', 'bsrSearchKw', 'bsrSearchResults',
   'bsrSearchStatus', 'bsrSearchPlatform', 'bsrSearchOrder', 'bsrSearchNative', 'bsrSearchMinPlay',
-  'bsrWeightBox', 'bsrWeightSliders', 'bsrWeights', 'bsrWeightSave', 'bsrWeightReset', 'bsrWeightToggle',
-  'bsrWeightPresets', 'bsrWeightPresetTip',
   'bsrResumeRow', 'bsrResumeTip', 'bsrAsrRestart',
   'bsrAiTxt', 'bsrAnchor', 'bsrCorrect', 'bsrPolishOn', 'bsrHotwordsOn', 'bsrLlmCorrect',
   'bsrCustomHotwords', 'bsrYtKey', 'bsrYtEye'];
@@ -105,7 +109,7 @@ UI_IDS.forEach(function (id) {
 });
 
 // 4. 新设置项有持久化（SETTINGS 定义 + GM_setValue）
-const SETTING_KEYS = ['polishOn', 'hotwordsOn', 'llmCorrect', 'ytKey', 'scoreWeights', 'customHotwords'];
+const SETTING_KEYS = ['polishOn', 'hotwordsOn', 'llmCorrect', 'ytKey', 'customHotwords'];
 SETTING_KEYS.forEach(function (key) {
   check('设置项 SETTINGS.' + key + ' 已定义', new RegExp(key + ':').test(SRC));
   check('设置项 bsr_' + key.replace(/[A-Z]/g, function (m) { return '_' + m.toLowerCase(); }) + ' 已持久化',
@@ -122,56 +126,24 @@ check('CHANGELOG 含当前版本 ' + version, version && changelog.indexOf(versi
 // 6. 热词降级逻辑在位（不支持 hotwords 的账号不能把转写搞挂）
 check('热词不支持时自动降级', /hotwordsFallbackDone/.test(SRC) && /已自动降级并关闭热词开关/.test(SRC));
 
-// 7. v9.3 权重滑块接线（拖滑块即时生效 + 与 JSON 双向同步 + 松手落盘）
-check('滑块按 WEIGHT_LABELS 渲染（不是写死的 HTML，新增权重自动多一项）',
-  /Object\.keys\(CandidateScorer\.WEIGHT_LABELS\)\.forEach/.test(SRC));
-check('滑块范围取自 WEIGHT_RANGE（与归一化截断边界同源，不货不对板）',
-  /CandidateScorer\.WEIGHT_RANGE\.min/.test(SRC) && /CandidateScorer\.WEIGHT_RANGE\.max/.test(SRC));
-check('滑块行带 data-w 键名（回刷时按键取值，不靠下标猜）', /data-w="' \+ key/.test(SRC));
-check('拖动过程刷数值并同步 JSON（input 事件，不落盘）',
-  /addEventListener\('input'/.test(SRC) && /syncSlidersToTextarea/.test(SRC));
-check('松手才落盘（change → persistWeightsFromSliders）',
-  /addEventListener\('change',\s*persistWeightsFromSliders\)/.test(SRC));
-check('落盘写的是同一个设置键并即时重渲染（保存后当前结果换档）',
-  /SETTINGS\.scoreWeights = root\.querySelector\('#bsrWeights'\)\.value;[\s\S]*?saveSettings\(\);[\s\S]*?render\(\);/.test(SRC));
-check('JSON 保存/恢复默认后滑块回刷（两边不打架）',
-  /#bsrWeightSave'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC)
-  && /#bsrWeightReset'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
-check('展开权重面板时滑块从当前设置回刷', /#bsrWeightToggle'\)\.onclick[\s\S]*?refreshWeightSliders\(\)/.test(SRC));
-check('refreshWeightSliders 调用点足够（定义 + 展开/保存/重置/初始化 5 处）',
-  countOf('refreshWeightSliders') >= 6, '实际 ' + countOf('refreshWeightSliders') + ' 处');
+// 7. v9.16 搜索筛选简化：砍掉 11 滑块权重面板，排序改走评分引擎默认权重
+check('搜索结果用评分引擎的默认权重打分（不再给手调滑块）',
+  /CandidateScorer\.scoreCandidate\(it, CandidateScorer\.DEFAULT_WEIGHTS\)/.test(SRC));
+check('评分引擎在搜索里有真实调用方（不再是死代码）',
+  countOf('CandidateScorer.scoreCandidate') >= 1);
+check('排序：有字幕优先 → 评分降序 → 播放量降序',
+  /hasNativeSubtitle === true \? 1 : 0/.test(SRC)
+  && /_score/.test(SRC)
+  && /Number\(b\.play\)/.test(SRC));
+check('搜索结果卡片点击直接打开视频（去掉二次点击看理由）',
+  /openCandidate\(search\.items\[i\]\)/.test(SRC));
+check('搜索状态文案改为「有字幕优先 · 点卡片直接打开」',
+  /有字幕优先 · 点卡片直接打开/.test(SRC));
+check('旧的权重滑块 UI 已彻底移除（bsrWeight* 全部不存在）',
+  !/bsrWeight/.test(SRC));
 
-// 9. v9.5 权重预设接线（三档按钮 = 改权重 + 高亮诚实 + 落盘即时生效）
-check('预设按钮按 WEIGHT_PRESETS 渲染（模块里加预设自动多一颗，不写死 HTML）',
-  /Object\.keys\(CandidateScorer\.WEIGHT_PRESETS\)\.forEach/.test(SRC)
-  && /data-preset="' \+ name/.test(SRC));
-check('按钮文案取 WEIGHT_PRESET_LABELS（英文键名兜底，不给用户看内部标识）',
-  /CandidateScorer\.WEIGHT_PRESET_LABELS\[name\] \|\| name/.test(SRC));
-// 这几条全部限定在被测函数体内判定（fnBody），不再用跨函数正则——
-// v9.5 第一版就是被 [\s\S]*? 喂饱的假绿灯
-check('点预设 → applyWeightPreset（getPreset 取值 + 落盘 + render 即时换档）',
-  /addEventListener\('click'[\s\S]{0,120}applyWeightPreset\(btn\.getAttribute\('data-preset'\)\)/.test(SRC)
-  && /CandidateScorer\.getPreset\(name\)/.test(fnBody('applyWeightPreset'))
-  && /saveSettings\(\)/.test(fnBody('applyWeightPreset'))
-  && /render\(\)/.test(fnBody('applyWeightPreset')));
-check('高亮用 matchPreset 判定，不靠猜（拖过滑块就转「自定义」）',
-  /CandidateScorer\.matchPreset\(currentWeightMap\(\)\)/.test(fnBody('syncPresetHighlight'))
-  && /tip\.textContent = '当前：' \+ \(cur \?/.test(fnBody('syncPresetHighlight')));
-check('自定义态有视觉区分（class custom），不假装还锁在某档上',
-  /tip\.classList\.toggle\('custom', !cur\)/.test(fnBody('syncPresetHighlight'))
-  && /\.bsr-wpreset-tip\.custom\{/.test(SRC));
-check('refreshWeightSliders 回刷完滑块之后才同步高亮（滑块一改立刻改口）',
-  /function refreshWeightSliders[\s\S]*\.bsr-wval'\)\.textContent[\s\S]*syncPresetHighlight\(\);/.test(
-    fnBody('refreshWeightSliders')));
-check('拖滑块落盘后也同步高亮',
-  /syncPresetHighlight\(\)/.test(fnBody('persistWeightsFromSliders')));
-check('预设按钮在初始化时建好（隐藏态建 DOM 无副作用，展开即时可用）',
-  /buildPresetButtons\(\);[\s\S]{0,80}refreshWeightSliders\(\);/.test(SRC));
-check('预设容器与提示行有 id 且已被 HTML 声明',
-  /id="bsrWeightPresets"/.test(SRC) && /id="bsrWeightPresetTip"/.test(SRC));
-
-// 10. v9.5 预设模块导出（UI 依赖的每个符号都得真导出，否则运行时空指针）
-['WEIGHT_PRESETS', 'WEIGHT_PRESET_LABELS', 'DEFAULT_PRESET', 'getPreset', 'matchPreset'].forEach(function (sym) {
+// 10. 候选评分模块导出健全性（test-scorer 依赖这些符号；getPreset/matchPreset 仍为模块内可用工具）
+['WEIGHT_PRESETS', 'WEIGHT_PRESET_LABELS', 'DEFAULT_PRESET', 'getPreset', 'matchPreset', 'scoreCandidate', 'normalizeWeights'].forEach(function (sym) {
   var mod = moduleSource('candidate-scorer.js');
   var exported = new RegExp(sym + ':').test(mod);
   var defined = new RegExp('function ' + sym + '\\b').test(mod)
@@ -179,8 +151,9 @@ check('预设容器与提示行有 id 且已被 HTML 声明',
   check('CandidateScorer.' + sym + ' 已定义且已导出', defined && exported,
     '定义=' + defined + ' 导出=' + exported);
 });
-check('UI 真的用到了 getPreset/matchPreset（导出了不引用 = 死代码，面板不亮）',
-  /CandidateScorer\.getPreset\(name\)/.test(SRC) && /CandidateScorer\.matchPreset\(currentWeightMap\(\)\)/.test(SRC));
+check('getPreset/matchPreset 仍是模块内可用函数（即便 UI 不再调，test-scorer 可覆盖）',
+  /function getPreset\(/.test(moduleSource('candidate-scorer.js'))
+  && /function matchPreset\(/.test(moduleSource('candidate-scorer.js')));
 
 // 8. v9.4 断点续传接线（SegResume 模块 + 分段路接入 + 「重新开始」出口）
 check('SegResume 已实例化', /var SegResume = createSegResumeModule\(\);/.test(SRC));

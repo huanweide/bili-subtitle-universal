@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.15.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）。
+// @version      9.16.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，有字幕优先、评分引擎默认权重排序、点卡片直接打开视频）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）；新增「进入视频自动获取字幕并复制」开关（默认关）、字幕区改为可点击行列表（点行跳到对应时间，命中行高亮）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -1518,13 +1518,13 @@
     hotwordsOn: GM_getValue('bsr_hotwords_on', true),
     polishOn: GM_getValue('bsr_polish_on', true),
     llmCorrect: GM_getValue('bsr_llm_correct', false),
-    // v9.2 搜索筛选 Tab：YouTube Data API Key + 候选评分权重（JSON，空=用模块默认）
+    // v9.2 搜索筛选 Tab：YouTube Data API Key
     ytKey: GM_getValue('bsr_yt_key', ''),
-    scoreWeights: GM_getValue('bsr_score_weights', ''),
     searchPlatform: GM_getValue('bsr_search_platform', 'bilibili'),
     customHotwords: GM_getValue('bsr_custom_hotwords', ''),
     // v9.6 换分 P（?p=2）后自动重新获取字幕：同视频换 P 只多一次字幕接口请求，不烧 ASR 额度，默认开
     autoFetchOnPageSwitch: GM_getValue('bsr_auto_fetch_page', true),
+    autoFetch: GM_getValue('bsr_auto_fetch', false),   // 进入视频自动获取字幕并复制（默认关，避免一开页就烧额度）
     // v9.6 导出形态按钮（AI 文本 / 锚点稿）的动作：copy=只复制（默认）/ download=只下载 / both=复制+下载
     exportMode: GM_getValue('bsr_export_mode', 'copy'),
     // v9.6 面板主题：auto=跟随系统（默认）/ light=始终浅色 / dark=始终深色
@@ -1554,10 +1554,10 @@
       GM_setValue('bsr_polish_on', SETTINGS.polishOn);
       GM_setValue('bsr_llm_correct', SETTINGS.llmCorrect);
       GM_setValue('bsr_yt_key', SETTINGS.ytKey);
-      GM_setValue('bsr_score_weights', SETTINGS.scoreWeights);
       GM_setValue('bsr_search_platform', SETTINGS.searchPlatform);
       GM_setValue('bsr_custom_hotwords', SETTINGS.customHotwords);
       GM_setValue('bsr_auto_fetch_page', SETTINGS.autoFetchOnPageSwitch);
+      GM_setValue('bsr_auto_fetch', SETTINGS.autoFetch);
       GM_setValue('bsr_export_mode', SETTINGS.exportMode);
       GM_setValue('bsr_theme', SETTINGS.theme);
       GM_setValue('bsr_hotkeys', SETTINGS.hotkeysOn);
@@ -3522,13 +3522,6 @@
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
   var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1 };
-  function activeScoreWeights() {
-    if (!SETTINGS.scoreWeights) return CandidateScorer.DEFAULT_WEIGHTS;
-    try {
-      var parsed = JSON.parse(SETTINGS.scoreWeights);
-      return CandidateScorer.normalizeWeights(parsed);
-    } catch (e) { return CandidateScorer.DEFAULT_WEIGHTS; }
-  }
   function fmtCount(n) {
     n = Number(n) || 0;
     if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + ' 亿';
@@ -3555,10 +3548,19 @@
       } else {
         items = await SearchFilter.searchBilibili(keyword, { order: search.order, maxResults: 20 }, deps);
       }
-      var weights = activeScoreWeights();
-      items.forEach(function (item) { item.score = CandidateScorer.scoreCandidate(item, weights); });
       var filtered = SearchFilter.filterCandidates(items, { minPlay: search.minPlay, nativeOnly: search.nativeOnly });
-      filtered.sort(function (a, b) { return (b.score ? b.score.total : 0) - (a.score ? a.score.total : 0); });
+      // 排序：有字幕优先（用户最想要带字幕的），其次用默认权重评分（评分引擎仍在跑，只是不再给手调滑块），最后播放量。
+      filtered.forEach(function (it) {
+        try { it._score = CandidateScorer.scoreCandidate(it, CandidateScorer.DEFAULT_WEIGHTS).total; }
+        catch (e) { it._score = 0; }
+      });
+      filtered.sort(function (a, b) {
+        var an = a.hasNativeSubtitle === true ? 1 : 0, bn = b.hasNativeSubtitle === true ? 1 : 0;
+        if (an !== bn) return bn - an;
+        var d = (Number(b._score) || 0) - (Number(a._score) || 0);
+        if (d !== 0) return d;
+        return (Number(b.play) || 0) - (Number(a.play) || 0);
+      });
       search.items = filtered;
       if (!filtered.length) search.err = '没有符合筛选条件的视频（可降低播放量门槛或关闭「仅有字幕」）';
     } catch (e) {
@@ -3603,8 +3605,9 @@
   }
 
   // ===================== 主流程 =====================
-  async function getSubtitles() {
+  async function getSubtitles(opts) {
     if (state.loading) return;
+    var autoCopy = !!(opts && opts.autoCopy);   // v9.16：autoFetch 触发时，取到后自动复制到剪贴板
     var myGen = asrGen;   // v8.1.8 修复：补世代号守卫——切 P/切视频后旧流程的结果一律丢弃，不再写回 state
     state.loading = true; state.err = ''; state.noSub = false; state.asrRan = false;
     state.asr = null; render();
@@ -3643,6 +3646,7 @@
           state.asr = null;
         }
         state.loading = false; render();
+        if (autoCopy && state.body) { copyText(bodyToTxt(activeBody() || [])); toast('已自动复制字幕到剪贴板'); }
       } else if (SETTINGS.asrEnable) {
         await runAsr();
       } else {
@@ -3796,7 +3800,16 @@
       '.bsr-get{background:#FB7299;width:100%;margin-bottom:8px}' +
       '.bsr-get:disabled{opacity:.6;cursor:default}' +
       '.bsr-c{background:#7C5CBF}.bsr-t{background:#4ecca3}.bsr-s{background:#3a8ee6}.bsr-cancel{background:#e05c5c}.bsr-asr{background:#ff8f00}' +
-      '.bsr-ta{width:100%;height:170px;box-sizing:border-box;border:1px solid #eee;border-radius:8px;padding:8px;font-size:12px;line-height:1.6;resize:vertical;font-family:inherit}' +
+      '.bsr-ta{width:100%;max-height:230px;overflow:auto;box-sizing:border-box;border:1px solid #eee;border-radius:8px;padding:6px;font-size:12px;line-height:1.6;font-family:inherit;background:#fff}' +
+      '.bsr-lines{margin:0}' +
+      '.bsr-line{display:flex;gap:8px;padding:3px 6px;border-radius:5px;cursor:pointer;align-items:baseline}' +
+      '.bsr-line:hover{background:#f3f0ff}' +
+      '.bsr-line.cur{background:#ffe9f2;box-shadow:inset 3px 0 0 #FB7299}' +
+      '.bsr-line.hit{background:#fff6d6}' +
+      '.bsr-line.hit.cur{background:#ffe9f2}' +
+      '.bsr-ts{flex:none;color:#999;font-variant-numeric:tabular-nums;font-size:11px;min-width:42px}' +
+      '.bsr-tx{flex:1;white-space:pre-wrap;word-break:break-word}' +
+      '.bsr-ph{color:#aaa;padding:8px;display:block}' +
       '.bsr-st{font-size:11px;color:#999;margin:6px 0;min-height:14px;line-height:1.5}' +
       '.bsr-prog{font-size:11px;color:#3a8ee6;margin:4px 0}' +
       '.bsr-asrbox{margin:6px 0}' +
@@ -3860,8 +3873,6 @@
       '.bsr-res-m{font-size:10px;color:#999;margin-top:4px;line-height:1.6}' +
       '.bsr-res-r{font-size:10px;color:#777;margin-top:5px;line-height:1.7;background:#fafafa;border-radius:6px;padding:5px 8px}' +
       '.bsr-res-r li{margin-left:14px}' +
-      '.bsr-tier{flex:none;font-size:10px;font-weight:700;border-radius:5px;padding:1px 6px;color:#fff}' +
-      '.bsr-tier.A{background:#4ecca3}.bsr-tier.B{background:#3a8ee6}.bsr-tier.C{background:#bbb}' +
       '.bsr-sub{display:inline-block;font-size:10px;border-radius:4px;padding:0 4px}' +
       '.bsr-sub.yes{background:#e6f9f1;color:#0a8f5f}.bsr-sub.no{background:#fdeeee;color:#c05050}' +
       '.bsr-empty{font-size:11px;color:#aaa;text-align:center;padding:18px 0;line-height:1.7}' +
@@ -3898,6 +3909,10 @@
       '#bsr-root[data-theme="dark"] .bsr-title{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-sel{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
       '#bsr-root[data-theme="dark"] .bsr-ta{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
+      '#bsr-root[data-theme="dark"] .bsr-line:hover{background:var(--bsr-soft)}' +
+      '#bsr-root[data-theme="dark"] .bsr-line.cur{background:#3a2230;box-shadow:inset 3px 0 0 #FB7299}' +
+      '#bsr-root[data-theme="dark"] .bsr-line.hit{background:#3a3520}' +
+      '#bsr-root[data-theme="dark"] .bsr-ts{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-st{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-prog{color:#7ab7f0}' +
       '#bsr-root[data-theme="dark"] .bsr-bar{background:var(--bsr-soft)}' +
@@ -3944,7 +3959,6 @@
       '#bsr-root[data-theme="dark"] .bsr-keywrap .eye{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.yes{background:#14352a;color:#5fd6a8}' +
       '#bsr-root[data-theme="dark"] .bsr-sub.no{background:#3a2020;color:#ff9a9a}' +
-      '#bsr-root[data-theme="dark"] .bsr-tier.C{background:#6a6a72}' +
       '#bsr-root[data-theme="dark"] #bsr-toast{background:#2a2a31;color:#ececf1;box-shadow:0 8px 30px rgba(0,0,0,.5)}' +
       // ================= v9.6 交互与可读性增强（明暗通用） =================
       '.bsr-btn{transition:filter .15s,transform .1s}' +
@@ -4003,7 +4017,7 @@
       '      <button type="button" class="bsr-btn bsr-c" id="bsrFindClear" style="flex:none" title="清空检索，恢复全篇">✕</button>' +
       '    </div>' +
       '    <div class="bsr-findinfo" id="bsrFindInfo" style="display:none"></div>' +
-      '    <textarea class="bsr-ta" id="bsrOut" readonly title="点某一行可以跳到视频的对应时间（可在设置里关掉）" placeholder="点击「获取字幕」后，字幕文字将显示在这里；取到后点某一行可跳到视频对应时间"></textarea>' +
+      '    <div class="bsr-ta bsr-lines" id="bsrOut" tabindex="0" title="点某一行可以跳到视频的对应时间（可在设置里关掉）"></div>' +
       '    <div class="bsr-ops" id="bsrOps" style="display:none">' +
       '      <button class="bsr-btn bsr-c" id="bsrCopy">📋 复制</button>' +
       '      <button class="bsr-btn bsr-t" id="bsrTxt">⬇ TXT</button>' +
@@ -4062,17 +4076,6 @@
       '      </div>' +
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
-      '      <div class="bsr-set" id="bsrWeightToggle">⚖ 评分权重（A/B/C 档怎么算）</div>' +
-      '      <div class="bsr-wbox" id="bsrWeightBox">' +
-      '        <div class="bsr-wtip">总分 ≥55 为 A（优先看）、≥25 为 B、其余 C。三档预设是常用策略的快捷入口（保守省 ASR 成本 / 激进追干货密度）；拖滑块可微调，松手即保存。下面 JSON 是高级编辑，两边始终保持同步，清空 JSON 保存 = 恢复默认。</div>' +
-      '        <div class="bsr-wpresets" id="bsrWeightPresets"><span class="bsr-wpreset-tip" id="bsrWeightPresetTip"></span></div>' +
-      '        <div id="bsrWeightSliders"></div>' +
-      '        <textarea id="bsrWeights" spellcheck="false"></textarea>' +
-      '        <div class="bsr-row" style="margin-top:6px">' +
-      '          <button class="bsr-btn bsr-s" id="bsrWeightSave" style="flex:1">保存权重</button>' +
-      '          <button class="bsr-btn bsr-cancel" id="bsrWeightReset" style="flex:1">恢复默认</button>' +
-      '        </div>' +
-      '      </div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）</div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
@@ -4167,6 +4170,7 @@
       '        <span class="eye" id="bsrYtEye">👁</span>' +
       '      </div>' +
       '      <label class="chk"><input type="checkbox" id="bsrAutoFetchPage" /> 换分 P（?p=2）后自动重新获取字幕（只多一次字幕请求，不烧额度）</label>' +
+      '      <label class="chk"><input type="checkbox" id="bsrAutoFetch" /> 进入视频自动获取字幕并复制到剪贴板（默认关，开启即自动取+复制）</label>' +
       '      <label>导出按钮（AI 文本 / 锚点稿）的动作</label>' +
       '      <select id="bsrExportMode">' +
       '        <option value="copy">只复制到剪贴板（推荐·不落文件）</option>' +
@@ -4289,11 +4293,14 @@
       promptsHost.appendChild(b);
     });
     // v9.10 点击字幕行跳转：同类脚本的标配交互，本项目以前只能看不能跳
-    root.querySelector('#bsrOut').onclick = function () {
+    root.querySelector('#bsrOut').onclick = function (e) {
       if (!SETTINGS.clickSeekOn || !state.body) return;
-      var lineIdx = this.value.slice(0, this.selectionStart).split('\n').length - 1;
-      var item = (activeBody() || [])[lineIdx];
-      if (item) seekTo(item.from);
+      var line = e.target.closest ? e.target.closest('.bsr-line') : null;
+      if (!line) return;
+      var from = Number(line.getAttribute('data-from')) || 0;
+      Array.prototype.forEach.call(this.querySelectorAll('.bsr-line'), function (l) { l.classList.remove('cur'); });
+      line.classList.add('cur');
+      seekTo(from);   // 自带 toast「已跳到 mm:ss」
     };
     // 检索框：输入即筛（不回车也生效），清空按钮恢复全篇
     var findInput = root.querySelector('#bsrFind');
@@ -4378,6 +4385,7 @@
       SETTINGS.customHotwords = root.querySelector('#bsrCustomHotwords').value.trim();
       SETTINGS.ytKey = root.querySelector('#bsrYtKey').value.trim();
       SETTINGS.autoFetchOnPageSwitch = root.querySelector('#bsrAutoFetchPage').checked;
+      SETTINGS.autoFetch = root.querySelector('#bsrAutoFetch').checked;
       SETTINGS.exportMode = root.querySelector('#bsrExportMode').value;
       SETTINGS.theme = root.querySelector('#bsrTheme').value;
       SETTINGS.hotkeysOn = root.querySelector('#bsrHotkeys').checked;
@@ -4438,126 +4446,7 @@
     root.querySelector('#bsrSearchMinPlay').onchange = function (e) { search.minPlay = Number(e.target.value) || 0; };
     root.querySelector('#bsrSearchKw').onkeydown = function (e) { if (e.key === 'Enter') runSearch(); };
     root.querySelector('#bsrSearchBtn').onclick = function () { search.keyword = root.querySelector('#bsrSearchKw').value; runSearch(); };
-    // ---- v9.3 权重滑块：拖动即时生效，与 JSON 双向同步 ----
-    function currentWeightMap() {
-      // 为什么单独包一层：SETTINGS.scoreWeights 是 JSON 字符串，可能是用户手改坏的，
-      // 解析失败时滑块不能白屏，退回默认值（与 normalizeWeights 的容错口径一致）。
-      if (!SETTINGS.scoreWeights) return CandidateScorer.normalizeWeights(null);
-      try { return CandidateScorer.normalizeWeights(JSON.parse(SETTINGS.scoreWeights)); }
-      catch (e) { return CandidateScorer.normalizeWeights(null); }
-    }
-    function weightSlidersBuilt() { return !!root.querySelector('#bsrWeightSliders .bsr-wrow'); }
-    function buildWeightSliders() {
-      var box = root.querySelector('#bsrWeightSliders');
-      if (!box || weightSlidersBuilt()) return;
-      var w = currentWeightMap();
-      var html = '';
-      // 滑块按 WEIGHT_LABELS 渲染：标签表与默认权重键集合由 test-scorer 断言保持一致，
-      // 新增权重键忘了加标签会直接测试红，不会静默少一项。
-      Object.keys(CandidateScorer.WEIGHT_LABELS).forEach(function (key) {
-        html += '<div class="bsr-wrow" data-w="' + key + '">' +
-          '<label>' + CandidateScorer.WEIGHT_LABELS[key] + '</label>' +
-          '<input type="range" min="' + CandidateScorer.WEIGHT_RANGE.min + '" max="' + CandidateScorer.WEIGHT_RANGE.max + '" step="1" value="' + w[key] + '" />' +
-          '<span class="bsr-wval">' + (w[key] > 0 ? '+' : '') + w[key] + '</span>' +
-          '</div>';
-      });
-      box.innerHTML = html;
-      Array.prototype.forEach.call(box.querySelectorAll('input[type=range]'), function (inp) {
-        // input 只刷界面：拖动过程每像素都落盘会打爆 GM_setValue；change 才是松手，才保存
-        inp.addEventListener('input', function () {
-          var v = Number(inp.value) || 0;
-          inp.closest('.bsr-wrow').querySelector('.bsr-wval').textContent = (v > 0 ? '+' : '') + v;
-          syncSlidersToTextarea();
-        });
-        inp.addEventListener('change', persistWeightsFromSliders);
-      });
-    }
-    function refreshWeightSliders() {
-      if (!weightSlidersBuilt()) { buildWeightSliders(); syncPresetHighlight(); return; }
-      var w = currentWeightMap();
-      Array.prototype.forEach.call(root.querySelectorAll('#bsrWeightSliders .bsr-wrow'), function (row) {
-        var v = w[row.getAttribute('data-w')];
-        row.querySelector('input[type=range]').value = v;
-        row.querySelector('.bsr-wval').textContent = (v > 0 ? '+' : '') + v;
-      });
-      syncPresetHighlight();   // 高亮跟当前权重走：滑块一改就可能脱离预设，必须立刻转「自定义」
-    }
-    function syncSlidersToTextarea() {
-      var map = {};
-      Array.prototype.forEach.call(root.querySelectorAll('#bsrWeightSliders .bsr-wrow'), function (row) {
-        map[row.getAttribute('data-w')] = Number(row.querySelector('input[type=range]').value) || 0;
-      });
-      root.querySelector('#bsrWeights').value = JSON.stringify(CandidateScorer.normalizeWeights(map), null, 1);
-    }
-    function persistWeightsFromSliders() {
-      syncSlidersToTextarea();
-      SETTINGS.scoreWeights = root.querySelector('#bsrWeights').value;
-      saveSettings();
-      render();   // 当前搜索结果即时换档，不用重新搜索
-      syncPresetHighlight();   // 拖滑块多半已脱离预设，提示立刻改口
-      toast('权重已保存，即时生效');
-    }
-    // ---- v9.5 权重预设：三档一键切换 ----
-    function buildPresetButtons() {
-      var bar = root.querySelector('#bsrWeightPresets');
-      if (!bar || bar.querySelector('button[data-preset]')) return;
-      var html = '';
-      // 按 WEIGHT_PRESETS 的键渲染，和滑块一样单一事实源：模块里加预设，这里自动多一颗按钮
-      Object.keys(CandidateScorer.WEIGHT_PRESETS).forEach(function (name) {
-        var label = CandidateScorer.WEIGHT_PRESET_LABELS[name] || name;
-        html += '<button type="button" data-preset="' + name + '">' + label + '</button>';
-      });
-      bar.insertAdjacentHTML('afterbegin', html);
-      Array.prototype.forEach.call(bar.querySelectorAll('button[data-preset]'), function (btn) {
-        btn.addEventListener('click', function () {
-          applyWeightPreset(btn.getAttribute('data-preset'));
-        });
-      });
-    }
-    function applyWeightPreset(name) {
-      var label = CandidateScorer.WEIGHT_PRESET_LABELS[name] || name;
-      SETTINGS.scoreWeights = JSON.stringify(CandidateScorer.getPreset(name), null, 1);
-      saveSettings();
-      var ta = root.querySelector('#bsrWeights');
-      if (ta) ta.value = SETTINGS.scoreWeights;
-      refreshWeightSliders();
-      render();   // 换档即时可见，不用重新搜索
-      toast('已切到「' + label + '」策略，即时生效');
-    }
-    function syncPresetHighlight() {
-      var bar = root.querySelector('#bsrWeightPresets');
-      var tip = root.querySelector('#bsrWeightPresetTip');
-      if (!bar || !tip) return;
-      var cur = CandidateScorer.matchPreset(currentWeightMap());
-      Array.prototype.forEach.call(bar.querySelectorAll('button[data-preset]'), function (btn) {
-        btn.classList.toggle('on', btn.getAttribute('data-preset') === cur);
-      });
-      tip.textContent = '当前：' + (cur ? (CandidateScorer.WEIGHT_PRESET_LABELS[cur] || cur) : '自定义');
-      tip.classList.toggle('custom', !cur);   // 脱档时标红，一眼看出「现在不是任何预设」
-    }
-    root.querySelector('#bsrWeightToggle').onclick = function () {
-      root.querySelector('#bsrWeightBox').classList.toggle('show');
-      refreshWeightSliders();   // 每次展开都从当前设置回刷：用户可能刚在别处改过 JSON
-    };
-    root.querySelector('#bsrWeightSave').onclick = function () {
-      var raw = root.querySelector('#bsrWeights').value.trim();
-      if (!raw) { SETTINGS.scoreWeights = ''; saveSettings(); refreshWeightSliders(); render(); toast('已恢复默认权重'); return; }
-      try {
-        var parsed = JSON.parse(raw);
-        CandidateScorer.normalizeWeights(parsed);   // 校验：非法权重直接抛，不进设置
-        SETTINGS.scoreWeights = raw; saveSettings();
-        refreshWeightSliders();   // JSON 保存后滑块跟上，两边不打架
-        render();
-        toast('权重已保存，即时生效');
-      } catch (e) { toast('权重 JSON 无效：' + e.message); }
-    };
-    root.querySelector('#bsrWeightReset').onclick = function () {
-      SETTINGS.scoreWeights = ''; saveSettings();
-      root.querySelector('#bsrWeights').value = JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
-      refreshWeightSliders();
-      render();
-      toast('已恢复默认权重');
-    };
+
     // ---- v9.2 双形态导出 + LLM 纠错 ----
     root.querySelector('#bsrAiTxt').onclick = exportAiText;
     root.querySelector('#bsrAnchor').onclick = exportAnchored;
@@ -4567,10 +4456,7 @@
       var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
       if (!card) return;
       var i = Number(card.getAttribute('data-i'));
-      var item = search.items[i];
-      if (!item) return;
-      if (search.expanded === i) openCandidate(item);
-      else { search.expanded = i; render(); }
+      openCandidate(search.items[i]);
     };
     // 回填设置
     root.querySelector('#bsrAiProvider').value = SETTINGS.aiProvider;
@@ -4594,6 +4480,7 @@
     root.querySelector('#bsrCustomHotwords').value = SETTINGS.customHotwords;
     root.querySelector('#bsrYtKey').value = SETTINGS.ytKey;
     root.querySelector('#bsrAutoFetchPage').checked = SETTINGS.autoFetchOnPageSwitch;
+    root.querySelector('#bsrAutoFetch').checked = SETTINGS.autoFetch;
     root.querySelector('#bsrExportMode').value = SETTINGS.exportMode || 'copy';
     root.querySelector('#bsrTheme').value = SETTINGS.theme || 'auto';
     root.querySelector('#bsrHotkeys').checked = SETTINGS.hotkeysOn;
@@ -4602,13 +4489,27 @@
     root.querySelector('#bsrSearchOrder').value = search.order;
     root.querySelector('#bsrSearchNative').checked = search.nativeOnly;
     root.querySelector('#bsrSearchMinPlay').value = String(search.minPlay);
-    root.querySelector('#bsrWeights').value = SETTINGS.scoreWeights || JSON.stringify(CandidateScorer.DEFAULT_WEIGHTS, null, 1);
-    buildPresetButtons();     // v9.5：三档预设按钮（同一初始化位，隐藏态建 DOM 无副作用）
-    refreshWeightSliders();   // 面板初始化就建好滑块（隐藏态建 DOM 无副作用），展开即时可用
     root.querySelector('#bsrYtEye').onclick = function () {
       var k = root.querySelector('#bsrYtKey');
       k.type = (k.type === 'password') ? 'text' : 'password';
     };
+  }
+
+  // v9.16 字幕改可点击行列表：点行跳视频对应时间；检索命中行高亮，让跳转有意义
+  function renderLines() {
+    var box = root.querySelector('#bsrOut');
+    if (!box) return;
+    if (!state.body) {
+      box.innerHTML = state.noSub ? '<span class="bsr-ph">' + escHtml(getVideoInfoText()) + '</span>' : '<span class="bsr-ph">点击「获取字幕」后，字幕将显示在这里</span>';
+      return;
+    }
+    var body = activeBody() || [];
+    box.innerHTML = body.map(function (item) {
+      var hit = state.searchKw ? SubExport.searchBody([item], state.searchKw).matched : false;
+      return '<div class="bsr-line' + (hit ? ' hit' : '') + '" data-from="' + (item.from || 0) + '">' +
+        '<span class="bsr-ts">' + SubExport.fmtClock(item.from || 0) + '</span>' +
+        '<span class="bsr-tx">' + escHtml(item.text || '') + '</span></div>';
+    }).join('');
   }
 
   function render() {
@@ -4754,7 +4655,7 @@
         ? bits.join(' · ')
         : '偏移只改导出文件里的时间戳（和点击跳转落点），不改文字；「只保留当前位置之后」会同时收窄文本框与所有导出。';
     }
-    $('#bsrOut').value = state.body ? bodyToTxt(activeBody() || []) : (state.noSub ? getVideoInfoText() : '');
+    renderLines();
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');
     if (state.subs.length) {
       lanRow.style.display = 'flex';
@@ -4775,30 +4676,23 @@
     var sst = $('#bsrSearchStatus');
     if (search.loading) sst.textContent = '⏳ 搜索中（B站需逐个探测字幕，稍候）...';
     else if (search.err) sst.textContent = '⚠️ ' + search.err;
-    else if (search.items.length) sst.textContent = '✅ ' + search.items.length + ' 个结果 · 按评分排序 · 点卡片看评分理由，再点打开视频';
+    else if (search.items.length) sst.textContent = '✅ ' + search.items.length + ' 个结果 · 有字幕优先 · 点卡片直接打开视频';
     else sst.textContent = '';
-    var sig = search.loading + '|' + search.err + '|' + search.items.length + '|' + search.expanded + '|' + SETTINGS.scoreWeights;
+    var sig = search.loading + '|' + search.err + '|' + search.items.length;
     if (sig !== render._searchSig) {
       render._searchSig = sig;
       var sbox = $('#bsrSearchResults');
       if (!search.items.length && !search.loading) {
-        sbox.innerHTML = '<div class="bsr-empty">输入关键词搜视频<br/>自动探测有没有字幕、算出 A/B/C 档「值不值得转写」<br/>B站免 Key · YouTube 需 Data API Key（⚙ 设置）</div>';
+        sbox.innerHTML = '<div class="bsr-empty">输入关键词搜视频<br/>自动探测有没有字幕，标出「有字幕 / 无字幕·需转写」<br/>点卡片直接用本脚本打开提取 · B站免 Key · YouTube 需 Data API Key（⚙ 设置）</div>';
       } else {
         sbox.innerHTML = search.items.map(function (item, i) {
-          var sc = item.score || { total: 0, tier: 'C', reasons: [] };
           var subBadge = item.hasNativeSubtitle === true ? '<span class="bsr-sub yes">有字幕</span>'
             : (item.hasNativeSubtitle === false ? '<span class="bsr-sub no">无字幕·需转写</span>' : '');
           var meta = (item.platform === 'youtube' ? 'YouTube' : 'B站') + ' · ' + fmtDurSec(item.durationSec) + ' · ' + fmtCount(item.play) + ' 播放' + (item.pubdate ? ' · ' + item.pubdate : '');
-          var reasons = (i === search.expanded && sc.reasons && sc.reasons.length)
-            ? '<ul class="bsr-res-r">' + sc.reasons.map(function (r) {
-                return '<li>' + (r.weight > 0 ? '+' : '') + r.weight + ' ' + String(r.detail).replace(/</g, '&lt;') + '</li>';
-              }).join('') + '</ul>'
-            : '';
-          return '<div class="bsr-res" data-i="' + i + '">' +
-            '<div class="bsr-res-t"><span>' + String(item.title || '').replace(/</g, '&lt;') + '</span>' +
-            '<span class="bsr-tier ' + sc.tier + '">' + sc.tier + ' · ' + sc.total + '</span></div>' +
+          return '<div class="bsr-res" data-i="' + i + '" title="点击直接用本脚本打开此视频提取字幕">' +
+            '<div class="bsr-res-t"><span>' + String(item.title || '').replace(/</g, '&lt;') + '</span></div>' +
             '<div class="bsr-res-m">' + subBadge + meta + ' · ' + String(item.author || '').replace(/</g, '&lt;') + '</div>' +
-            reasons + '</div>';
+            '</div>';
         }).join('');
       }
     }
@@ -4844,6 +4738,14 @@
   }
 
   // ===================== 启动 / 视频切换检测 =====================
+  // v9.16 进入视频自动获取字幕并复制（autoFetch 开关，默认关，避免一开页就烧额度）
+  function scheduleAutoFetch() {
+    if (!SETTINGS.autoFetch) return;
+    if (state.loading) return;
+    if (!state.adapter) return;
+    getSubtitles({ autoCopy: true });
+  }
+
   function resetForNewVideo() {
     asrGen++;   // 使旧 ASR/翻译任务全部进入 stale：SPA 切视频后旧结果一律丢弃，不污染新视频
     if (state.asr) state.asr.cancel = true;
@@ -4890,6 +4792,9 @@
     if (switchingPage && SETTINGS.autoFetchOnPageSwitch) {
       log('检测到换 P（P' + RouteIdentity.pageOf(nextHref) + '），自动重新获取字幕');
       setTimeout(function () { if (state.adapter && !state.loading) getSubtitles(); }, 400);
+    } else if (SETTINGS.autoFetch) {
+      // 换了整条视频且开了「自动获取」：自动取 + 复制
+      setTimeout(scheduleAutoFetch, 500);
     }
   }
 
@@ -4897,7 +4802,7 @@
     if (!isSupportedSite()) return;   // 纯文字页面不打扰
     buildUI();
     var ad = detectAdapter();
-    if (ad) { state.adapter = ad; ad.resolve().then(render); }
+    if (ad) { state.adapter = ad; ad.resolve().then(function () { render(); scheduleAutoFetch(); }); }
     var last = location.href;
     // 轮询 URL 变化（SPA 切换）
     setInterval(function () {

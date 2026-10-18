@@ -190,8 +190,10 @@ test('C7 检索结果要告诉用户「筛掉了多少」（不然复制出去�
   ok(/复制与导出只出命中行/.test(SRC), '要说明导出范围变了');
 });
 
-test('C8 文本框显示过滤后的内容（不是全文）', function () {
-  ok(/\$\('#bsrOut'\)\.value = state\.body \? bodyToTxt\(activeBody\(\)/.test(SRC), '文本框要走 activeBody');
+test('C8 字幕区显示过滤后的内容（不是全文）— 行列表走 activeBody', function () {
+  ok(/function renderLines\(\)/.test(SRC), '要有 renderLines');
+  var fn = SRC.slice(SRC.indexOf('function renderLines()'), SRC.indexOf('function renderLines()') + 320);
+  ok(/activeBody\(\)/.test(fn), '行列表渲染要走 activeBody（检索后只出命中行）');
 });
 
 test('C9 快捷键：Alt+S 开合 / Esc 收起 / Ctrl+Enter 取字幕，且输入框内不抢键', function () {
@@ -296,11 +298,11 @@ test('E3 提示词带的是 activeBody（检索后只带命中行，不是整篇
   ok(/SubExport\.buildPrompt\(p\.id, bodyToTxt\(activeBody\(\)/.test(SRC), '要用 activeBody');
 });
 
-test('E4 点击字幕行跳转：textarea 有 onclick，按行号取时间点', function () {
-  ok(/#bsrOut'\)\.onclick/.test(SRC), '文本框要有点击处理');
-  ok(/selectionStart\)\.split\('\\n'\)\.length - 1/.test(SRC) || /slice\(0, this\.selectionStart\)\.split\('\\n'\)\.length - 1/.test(SRC), '要按光标算出行号');
-  ok(/\(activeBody\(\) \|\| \[\]\)\[lineIdx\]/.test(SRC), '行号对应到过滤后的字幕行');
-  ok(/seekTo\(item\.from\)/.test(SRC), '要跳到该行起点');
+test('E4 点击字幕行跳转：行列表可点击，按行取时间点（不再用 textarea 光标算行号）', function () {
+  ok(/#bsrOut'\)\.onclick/.test(SRC), '行容器要有点击处理');
+  ok(/\.closest\('\.bsr-line'\)/.test(SRC), '点击要落到某一行');
+  ok(/getAttribute\('data-from'\)/.test(SRC), '行里带 data-from 时间戳');
+  ok(/seekTo\(from\)/.test(SRC), '要跳到该行起点');
 });
 
 test('E5 seekTo：找不到播放器要明说，不能静默失败', function () {

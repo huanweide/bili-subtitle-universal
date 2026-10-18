@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 9.16.0 · 搜索筛选简化 + 自动获取开关 + 字幕行列表点击跳转
+
+**maxloop 一轮：用户点出四处问题——① 不知道「第二个搜索」干嘛用、与其堆砌无意义 UI 不如简化；② 自动下载了字幕却要手动复制，应有个默认关的「进入即取+复制」；③ 原 textarea 点一下算行号跳转，不直观、无提示、前端不友好、没意义；④ 有些前端显示本就没意义，该清就清。**
+
+### 改了什么
+
+- **搜索筛选 Tab 简化（对应用户点 ① 与 ④）**：砍掉 11 滑块权重面板（A/B/C 三档可解释评分 + 权重可调 + 三档预设）。保留跨站搜索本身，排序改为「有字幕优先 → 评分引擎默认权重 → 播放量降序」，结果卡片点击**直接打开视频**（不再是「第一次看理由、第二次才打开」）。`@description` 同步去掉旧权重话术。
+- **新增「进入视频自动获取字幕并复制」开关（默认关，对应 ②）**：`SETTINGS.autoFetch`（`bsr_auto_fetch`，默认 `false`）。开启后 `boot()` 与切 P 都自动 `getSubtitles({ autoCopy: true })`——等字幕到手自动复制到剪贴板并 toast，不烧额外额度；与既有的「切分 P 自动重取」`autoFetchOnPageSwitch` 分工清晰。
+- **字幕区改为可点击行列表（对应 ③）**：原 `<textarea>` 换成 `<div class="bsr-lines">`，每行带「时间戳 + 文字」，可点击。点击某行 → 高亮（`.cur`）+ `seekTo(from)` + toast「已跳到 mm:ss」；检索命中行加 `.hit` 高亮。跳转从此**直观、有反馈、有意义**。
+- **清理无意义前端 / 死代码（对应 ④）**：删除 `bsr-tier` 死 CSS（tier 文案已不再渲染）；删除已无调用方的 `scoreWeights` 设置项（只写不读）。`CandidateScorer` 评分模块保留（纯函数库，`test-scorer` 依赖），并重新接入 `runSearch` 作为默认权重排序引擎，不再是死代码。
+
+### 测试
+
+- `tests/test-wiring.js`：删除 20 条过时权重面板断言；改为断言「搜索用默认权重打分 / scoreCandidate 有真实调用方 / 排序三段式 / 卡片直接打开 / 旧 UI 已移除 / 模块导出健全」；修正「调用方」判定以识别模块内本地调用（如 `normalizeWeights` 被 `scoreCandidate` 内部调用）。
+- `tests/test-sub.js`：C8 改为断言行列表 `renderLines` 走 `activeBody`；E4 改为断言 `.bsr-line` + `data-from` + `seekTo(from)` 的新跳转机制。
+- `tests/test-claims.js`：新增对自动获取开关、行列表跳转、搜索简化的断言（88/88）。
+- 全电池：`test-wiring 79/79`、`test-sub 50/50`、`test-scorer 32/32`、`test-claims 88/88`、`test-ui 21/21`、`test-site 25/25`、`test-route 25/25`、`test-roundtrip 15/15`、`run-tests 86/0 失败`。
+
 ## 9.15.0 · 设置里「测试连接」：切了厂商先验 Key，不烧额度
 
 **v9.14.0 把 AI 厂商做成可切换，但漏了一个 C 端标配体验：用户填完 OpenAI / DeepSeek 的 Key，没有地方确认对不对——只能等跑一次 3 小时转写才发现 Key 是错的，白烧钱又白等。竞品里「填完点一下测连通」是基本功。**

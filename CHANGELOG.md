@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 9.14.0 · AI 厂商通用化：不再绑死硅基流动
+
+**以前转写 / 翻译的 API 地址、Key、模型全部写死在硅基流动（SenseVoice + Qwen）。想用自己 OpenAI / DeepSeek 的 Key 的用户没门路，GitHub 上同类脚本的「能不能换 Key」是高频吐槽点。**
+
+### 改了什么
+
+- **AI 厂商预设表 `AI_PROVIDERS`**：内置 5 家——硅基流动（默认，有免费额度）、OpenAI、DeepSeek、OpenRouter、自定义 OpenAI 兼容端点。每家声明 `base` / 音频端点 / 对话端点 / 能力标记（是否支持语音转写、热词）/ 推荐模型清单。
+- **设置面板**：顶部新增「AI 厂商」下拉；Key 与模型都改成可手填（`<input> + <datalist>`），既给预设一键点选，也开放任意 OpenAI 兼容模型名；自定义厂商额外显示「API 根地址」「音频端点」输入框。
+- **调用层去硬编码**：`sfTranscribe`/`sfChat` 重构成 `aiTranscribe`/`aiChat`，端点由 `aiBaseUrl()` + `aiEndpointPath()` 按当前厂商拼出，鉴权统一走 `aiAuthHeader()`。**源码里再没有任何写死的 `api.siliconflow.cn` 调用 URL**。
+- **能力兜底**：DeepSeek / OpenRouter 标记 `supportsAudio:false`，点转写会直接给友好提示而不是 404；热词增强只在硅基流动开启（其它厂商没有该参数，瞎塞会 4xx）。
+- **旧 Key 平滑迁移**：原 `bsr_sf_key` 在加载时回读进 `bsr_ai_key`，老用户升级不用重填。
+
+### 测试
+
+- `tests/test-claims.js` 新增「九·五、AI 厂商通用化」一节 9 条断言：5 家预设齐全、端点由通用解析得出且不再写死域名、旧函数已重构、能力标记存在、DeepSeek/OpenRouter 标记不支持转写、热词只硅基流动启用、自定义端点字段存在、模型可手填、换厂商刷新接线、README 宣传对齐。
+- `@connect` 白名单补 `api.openai.com` / `api.deepseek.com` / `openrouter.ai`。
+
 ## 9.13.0 · 通用站再扩一圈：JS 内存字幕轨道也能抓
 
 **以前通用站只扫 `<video>` 下面挂的 `<track>` 标签（WebVTT 文件）。但大量现代播放器是 JS 运行时把字幕塞进 `video.textTracks` 的——DOM 里根本没有 `<track>`，于是被一律判成「无字幕」。这是通用性上一个真实的漏网洞。**

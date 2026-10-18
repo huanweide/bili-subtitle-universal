@@ -127,12 +127,43 @@ claim('能写就能读回来：SRT / VTT 的导出器与解析器成对存在',
 // ===================== 九、安全与隐私承诺 =====================
 
 claim('纯前端：没有向自有服务器上报（@connect 白名单内无作者域名）',
-  !/@connect\s+(?!api\.bilibili|hdslb|aisubtitle|bilivideo|akamaized|api\.siliconflow|www\.youtube|youtube\.com|video\.google|googlevideo|\*)\S+/i.test(META));
+  !/@connect\s+(?!api\.bilibili|hdslb|aisubtitle|bilivideo|akamaized|api\.siliconflow|api\.openai|api\.deepseek|openrouter|www\.youtube|youtube\.com|video\.google|googlevideo|\*)\S+/i.test(META));
 claim('密钥只存本地（走 GM 存储，不写死在源码里）',
-  has("GM_setValue\\('bsr_sf_key'") && !/sk-[A-Za-z0-9]{20,}/.test(SRC));
+  has("GM_setValue\\('bsr_ai_key'") && !/sk-[A-Za-z0-9]{20,}/.test(SRC));
 claim('@grant 声明齐全（用啥声明啥，没有多余权限）',
   /@grant\s+GM_xmlhttpRequest/.test(META) && /@grant\s+GM_setValue/.test(META) && /@grant\s+GM_getValue/.test(META));
 claim('远程文本写进 innerHTML 前统一转义', has('escHtml'));
+
+// ===================== 九·五、AI 厂商通用化（v9.14.0） =====================
+
+claim('AI 厂商可切换：内置多家预设（硅基流动 / OpenAI / DeepSeek / OpenRouter / 自定义）',
+  has('AI_PROVIDERS = \\{') && has('siliconflow:') && has('openai:') && has('deepseek:') && has('openrouter:') && has('custom:'));
+claim('转写 / 翻译调用的端点由通用解析得出（不再写死硅基流动域名）',
+  has('aiBaseUrl') && has('aiEndpointPath') && has('aiAuthHeader') && !/url:\s*'https:\/\/api\.siliconflow\.cn/.test(SRC));
+claim('旧写死函数已重构为通用函数（sfTranscribe→aiTranscribe，sfChat→aiChat）',
+  has('aiTranscribe') && has('aiChat') && !has('function sfTranscribe') && !has('function sfChat'));
+claim('每个厂商声明能力标记（是否支持语音转写 / 热词）',
+  has('supportsAudio') && has('supportsHotwords'));
+claim('DeepSeek / OpenRouter 明确标记不支持语音转写（避免点了转写却 404）',
+  has("audio: null, chat: '/chat/completions'"));
+claim('硅基流动预设端点正确（base + 音频/对话端点，拼接即真实可调用地址）',
+  has("base: 'https://api.siliconflow.cn/v1'") && has("audio: '/audio/transcriptions'") && has("chat: '/chat/completions'"));
+claim('OpenAI 预设端点正确（whisper 音频 + 对话，与官方一致）',
+  has("base: 'https://api.openai.com/v1'") && has("audio: '/audio/transcriptions'") && has("chat: '/chat/completions'"));
+claim('DeepSeek 端点正确（base + 仅对话，audio 为 null）',
+  has("base: 'https://api.deepseek.com/v1'") && has("audio: null, chat: '/chat/completions'"));
+claim('OpenRouter 端点正确（base + 仅对话，audio 为 null）',
+  has("base: 'https://openrouter.ai/api/v1'") && has("audio: null, chat: '/chat/completions'"));
+claim('热词增强只在硅基流动启用，其它厂商不塞该参数（否则 4xx）',
+  has('supportsHotwords') && has("\\(p\\.supportsHotwords\\) \\? currentHotwords\\(\\) : \\[\\]"));
+claim('自定义厂商允许填自己的 API 根地址与音频端点',
+  has("SETTINGS.aiBase") && has("SETTINGS.aiAudioEp") && has("bsrAiBase") && has("bsrAiAudioEp"));
+claim('模型选择可手填任意 OpenAI 兼容模型名（datalist 既给预设也开放自由输入）',
+  has('list="bsrAsrModelList"') && has('list="bsrTModelList"') && has('fillModelList'));
+claim('换厂商时模型清单与 Key 提示同步刷新（refreshProviderUI 接线）',
+  has('refreshProviderUI') && has("'#bsrAiProvider'") && has('currentProvider'));
+claim('README 宣传了可切换 AI 厂商',
+  /AI 厂商|厂商|OpenAI|DeepSeek|OpenRouter|自定义 OpenAI/.test(README));
 
 // ===================== 十、文档与实现对齐 =====================
 

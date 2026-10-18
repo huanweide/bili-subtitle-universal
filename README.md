@@ -3,7 +3,7 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.13.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.14.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -29,7 +29,7 @@
 | 理由 | 具体表现 |
 |---|---|
 | **全网通用，不是一个站的专用工具** | B 站（普通 / 番剧 / 课堂 / 稍后再看 / 收藏夹 / 合集 / **网页里 iframe 嵌入的播放器**）、YouTube（观看页 / 嵌入 / Shorts / 直播 / 短链）、任意网页 `<video>` 的 WebVTT。v9.8 起认领规则是一张可测试的表，不再散在三条正则里 |
-| **没有字幕才是它的主场** | 内置硅基流动 SenseVoice 云转写，把「无字幕视频」这条死路接活 |
+| **没有字幕才是它的主场** | 内置 AI 语音转写，把「无字幕视频」这条死路接活；**AI 厂商可切换**（硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点），Key 与模型都在设置里随手改，不绑死任何一家 |
 | **3 小时长音频真的能跑完** | v9.0 分段解码：不播放、不整段解码，按分片目录逐片取逐片解，内存恒定；v9.4 断点续传：每批约 2 分钟音频转完即落盘，刷新/误关/断网后重转自动跳过已完成部分，不花第二遍钱 |
 | **转写时一声不响** | 分段解码根本不播放；兜底路线全程静音（增益 0）。最小化页面照样跑 |
 | **进度看得见** | 五阶段进度条 + 实时字幕流（边转边长）+ 预计剩余时间 + 收起后的小胶囊 + 完成系统通知 |
@@ -97,7 +97,7 @@
 
 ### 三、可选翻译
 
-转写完直接翻。硅基流动 Qwen2.5-72B / 7B / DeepSeek-V3 三选一，批量 120 条一次调用。
+转写完直接翻。翻译模型可在设置里选预设（硅基流动 Qwen2.5-72B / 7B / DeepSeek-V3、OpenAI gpt-4o-mini、OpenRouter 等），也可手填任意 OpenAI 兼容模型名，批量 120 条一次调用；**AI 厂商**随你切换，自带 Key 即可。
 
 ### 四、导出（双形态 + VTT / MD）
 
@@ -212,9 +212,9 @@
 
 Edge / Chrome / Firefox 应用商店搜「Tampermonkey」一键安装。
 
-**第 2 步 · 拿一个硅基流动 API Key**（只用官方字幕的话可跳过）
+**第 2 步 · 拿一个 AI API Key**（只用官方字幕的话可跳过）
 
-用 GitHub 账号登录 [cloud.siliconflow.cn](https://cloud.siliconflow.cn/i/axOmWfWi) 注册，新用户送 ¥16 代金券，跑 AI 转写完全够用。进控制台复制 `sk-` 开头的 Key。
+不需要转写/翻译就不用填。想用 AI 能力，去任意一家开 OpenAI 兼容接口的厂商拿 Key 即可——默认是 [硅基流动 cloud.siliconflow.cn](https://cloud.siliconflow.cn/i/axOmWfWi)（GitHub 注册送 ¥16 代金券，跑 AI 转写完全够用）；也支持 OpenAI、DeepSeek、OpenRouter，或你自己的兼容端点。装好后到面板 ⚙ 设置里选「AI 厂商」、粘贴 Key、按需挑模型（可手填任意模型名）。进控制台复制 `sk-` 开头的 Key。
 
 **第 3 步 · 装脚本**
 
@@ -301,12 +301,13 @@ Edge / Chrome / Firefox 应用商店搜「Tampermonkey」一键安装。
 
 | 选项 | 说明 |
 |---|---|
-| 硅基流动 API Key | AI 转写与翻译共用，只存本地 |
+| AI 厂商 | 硅基流动（默认）/ OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，决定 API 地址与推荐模型 |
+| API Key | 当前厂商的 Key，只存本地；自定义端点还需填 API 根地址（与音频端点） |
 | 无字幕时自动转写 | 关掉则只提示，不自动开跑 |
 | 字幕获取失败时自动转写 | 官方接口失败兜底 |
 | 始终使用音频转写 | 无视自带字幕（适合字幕损坏的视频） |
 | 转写语言 | 自动识别 / 中文 / 英文 / 日文 / 韩文 / 粤语 |
-| 转写模型 | SenseVoiceSmall（快）/ SenseVoiceLarge（更准） |
+| 转写模型 | 可点选厂商预设（如 SenseVoiceSmall/Large、whisper-1），也可手填任意模型名 |
 | 分片时长 | 5 / 10 / 15 / 20 分钟一片 |
 | 超长视频策略 | 自动（推荐）/ 始终整体解码（最快最吃内存）/ 始终播放录制（最稳最慢） |
 | 播放录制倍速 | 2 / 4 / 8 / 16 倍速（仅兜底路线用得到） |

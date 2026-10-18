@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.13.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动用「硅基流动」SenseVoice AI 语音转写（v9.0 分段解码内存恒定、完全不播放、五阶段进度可见，3 小时长音频稳跑，v9.4 起每批落盘断点续传）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译。
+// @version      9.14.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -17,7 +17,7 @@
 // @connect      bilivideo.com
 // @connect      bilivideo.cn
 // @connect      akamaized.net
-// @connect      api.siliconflow.cn
+// @connect      api.siliconflow.cn api.openai.com api.deepseek.com openrouter.ai
 // @connect      www.youtube.com
 // @connect      youtube.com
 // @connect      video.google.com
@@ -1498,7 +1498,12 @@
 
   // ===================== 设置（持久化） =====================
   var SETTINGS = {
-    sfKey: GM_getValue('bsr_sf_key', ''),
+    // v9.14.0 AI 厂商通用化：aiProvider 选预设，aiKey 取代原 sfKey（保留 sfKey 回读做一次性迁移），
+    // aiBase 仅自定义厂商用；asrModel / translateModel 仍是自由文本，可手填任意 OpenAI 兼容模型。
+    aiProvider: GM_getValue('bsr_ai_provider', 'siliconflow'),
+    aiKey: GM_getValue('bsr_ai_key', GM_getValue('bsr_sf_key', '')),
+    aiBase: GM_getValue('bsr_ai_base', ''),
+    aiAudioEp: GM_getValue('bsr_ai_audio_ep', ''),
     asrEnable: GM_getValue('bsr_asr_enable', true),
     asrFallback: GM_getValue('bsr_asr_fallback', true),
     asrForce: GM_getValue('bsr_asr_force', false),
@@ -1531,7 +1536,10 @@
   };
   function saveSettings() {
     try {
-      GM_setValue('bsr_sf_key', SETTINGS.sfKey);
+      GM_setValue('bsr_ai_key', SETTINGS.aiKey);
+      GM_setValue('bsr_ai_provider', SETTINGS.aiProvider);
+      GM_setValue('bsr_ai_base', SETTINGS.aiBase);
+      GM_setValue('bsr_ai_audio_ep', SETTINGS.aiAudioEp);
       GM_setValue('bsr_asr_enable', SETTINGS.asrEnable);
       GM_setValue('bsr_asr_fallback', SETTINGS.asrFallback);
       GM_setValue('bsr_asr_force', SETTINGS.asrForce);
@@ -2438,7 +2446,71 @@
     return (h ? p(h, 2) + ':' : '') + p(m, 2) + ':' + p(s, 2);
   }
 
-  // ===================== AI 语音转写（硅基流动 SenseVoice） =====================
+  // ===================== AI 厂商通用化预设（v9.14.0） =====================
+  // 不再写死硅基流动：转写 / 翻译可以切到 OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点。
+  // 每个预设声明：base（API 根地址）、audio（语音转写端点，null=该厂商不支持转写）、chat（对话端点）、
+  // supportsAudio / supportsHotwords（能力标记）、keyPlaceholder、推荐模型清单（既是下拉预设，也允许用户手填任意模型名）。
+  var AI_PROVIDERS = {
+    siliconflow: {
+      label: '硅基流动 SiliconFlow',
+      base: 'https://api.siliconflow.cn/v1',
+      audio: '/audio/transcriptions', chat: '/chat/completions',
+      supportsAudio: true, supportsHotwords: true,
+      keyPlaceholder: 'sk-...',
+      asrModels: ['FunAudioLLM/SenseVoiceSmall', 'FunAudioLLM/SenseVoiceLarge'],
+      chatModels: ['Qwen/Qwen2.5-72B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3', 'moonshotai/Kimi-K2-Instruct'],
+      freeNote: 'GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）'
+    },
+    openai: {
+      label: 'OpenAI',
+      base: 'https://api.openai.com/v1',
+      audio: '/audio/transcriptions', chat: '/chat/completions',
+      supportsAudio: true, supportsHotwords: false,
+      keyPlaceholder: 'sk-...',
+      asrModels: ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
+      chatModels: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini']
+    },
+    deepseek: {
+      label: 'DeepSeek',
+      base: 'https://api.deepseek.com/v1',
+      audio: null, chat: '/chat/completions',
+      supportsAudio: false, supportsHotwords: false,
+      keyPlaceholder: 'sk-...',
+      chatModels: ['deepseek-chat', 'deepseek-reasoner']
+    },
+    openrouter: {
+      label: 'OpenRouter',
+      base: 'https://openrouter.ai/api/v1',
+      audio: null, chat: '/chat/completions',
+      supportsAudio: false, supportsHotwords: false,
+      keyPlaceholder: 'sk-or-...',
+      chatModels: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-haiku', 'google/gemini-flash-1.5', 'meta-llama/llama-3.1-8b-instruct']
+    },
+    custom: {
+      label: '自定义 OpenAI 兼容',
+      base: '', audio: '/audio/transcriptions', chat: '/chat/completions',
+      supportsAudio: true, supportsHotwords: false,
+      keyPlaceholder: '你的 Key',
+      asrModels: [], chatModels: []
+    }
+  };
+  function currentProvider() { return AI_PROVIDERS[SETTINGS.aiProvider] || AI_PROVIDERS.siliconflow; }
+  // 端点根地址：自定义厂商用用户填的 aiBase，其余用预设 base。统一去掉末尾 /，拼接时再补一个。
+  function aiBaseUrl() {
+    var b = (SETTINGS.aiProvider === 'custom') ? (SETTINGS.aiBase || '') : currentProvider().base;
+    return (b || '').replace(/\/+$/, '');
+  }
+  // 取音频 / 对话端点路径：自定义厂商允许单独覆盖音频端点（aiAudioEp），其余跟随预设。
+  function aiEndpointPath(kind) {
+    var p = currentProvider();
+    var ep = (SETTINGS.aiProvider === 'custom')
+      ? (kind === 'audio' ? (SETTINGS.aiAudioEp || p.audio) : p.chat)
+      : (kind === 'audio' ? p.audio : p.chat);
+    return (ep || '').replace(/^\/+/, '');
+  }
+  function aiAuthHeader() { return { 'Authorization': 'Bearer ' + (SETTINGS.aiKey || '') }; }
+
+  // ===================== AI 语音转写 =====================
   // v9.2 热词注入：词全部来自视频自身元数据（标题/UP主/分区/标签/简介）+ 用户自定义，
   // 不联网搜索（答案就在视频自己的元数据里，见 transcript-quality 模块注释）。
   // 降级策略：老账号/区域不支持 hotwords 参数时接口会 4xx，此时去掉参数重试一次，
@@ -2449,31 +2521,37 @@
     var meta = { title: state.title, author: state.up, desc: state.desc, category: state.category, tags: state.tags };
     try { return TranscriptQuality.buildHotwords(meta, SETTINGS.customHotwords || ''); } catch (e) { return []; }
   }
-  function sfTranscribe(blob, fileName) {
+  function aiTranscribe(blob, fileName) {
     return new Promise(function (resolve, reject) {
+      var p = currentProvider();
+      if (!p.supportsAudio) {
+        reject(new Error('当前厂商「' + p.label + '」不支持语音转写，请改用硅基流动 / OpenAI，或在「自定义」里填音频端点'));
+        return;
+      }
       var fd = new FormData();
       fd.append('model', SETTINGS.asrModel);
       fd.append('file', blob, fileName || 'chunk.wav');
       if (SETTINGS.asrLang && SETTINGS.asrLang !== 'auto') fd.append('language', SETTINGS.asrLang);
-      var hotwords = currentHotwords();
+      // 热词是硅基流动专属增强；其它厂商（OpenAI/DeepSeek/OpenRouter/自定义）没有该参数，不能瞎塞否则 4xx。
+      var hotwords = (p.supportsHotwords) ? currentHotwords() : [];
       if (hotwords.length) fd.append('hotwords', JSON.stringify(hotwords));
       fd.append('response_format', 'srt');
       GM_xmlhttpRequest({
         method: 'POST',
-        url: 'https://api.siliconflow.cn/v1/audio/transcriptions',
-        headers: { 'Authorization': 'Bearer ' + SETTINGS.sfKey },
+        url: aiBaseUrl() + '/' + aiEndpointPath('audio'),
+        headers: aiAuthHeader(),
         data: fd,
         timeout: 300000,
         onload: function (r) {
           if (r.status >= 200 && r.status < 300) { resolve(r.responseText); return; }
-          // 带热词被拒（4xx 且错误体提到热词/参数）→ 脱裤重试一次
+          // 带热词被拒（4xx 且错误体提到热词/参数）→ 脱裤重试一次（仅硅基流动会进这里）
           if (hotwords.length && r.status >= 400 && r.status < 500 &&
               /hotword|热词|parameter|param|unsupported|invalid/i.test(String(r.responseText || ''))) {
             hotwordsFallbackDone = true;
             SETTINGS.hotwordsOn = false; saveSettings();
             log('热词参数不被支持，已自动降级并关闭热词开关');
             toast('当前账号不支持热词参数，已自动关闭（转写继续）');
-            sfTranscribe(blob, fileName).then(resolve, reject);
+            aiTranscribe(blob, fileName).then(resolve, reject);
             return;
           }
           reject(new Error('ASR HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 160)));
@@ -2484,7 +2562,7 @@
     });
   }
   async function transcribeWav(blob, fileName) {
-    var text = await sfTranscribe(blob, fileName);
+    var text = await aiTranscribe(blob, fileName);
     if (/^\s*\{/.test(text)) {
       try {
         var j = JSON.parse(text);
@@ -2513,8 +2591,13 @@
   async function runAsr() {
     var myGen = asrGen;
     state.asrRan = true;
-    if (!SETTINGS.sfKey) {
-      state.err = '未配置硅基流动 API Key（⚙ 设置 → 填入 sk- 开头 Key，cloud.siliconflow.cn 获取）';
+    if (!currentProvider().supportsAudio) {
+      state.err = '当前 AI 厂商「' + currentProvider().label + '」不支持语音转写，请到 ⚙ 设置切换为硅基流动 / OpenAI，或在「自定义」里填音频端点';
+      state.loading = false; render(); return;
+    }
+    if (!SETTINGS.aiKey) {
+      var pk = currentProvider();
+      state.err = '未配置 AI API Key（⚙ 设置 → 选厂商并填入 Key' + (pk.freeNote ? '；' + pk.freeNote : '') + '）';
       state.loading = false; render(); return;
     }
     var ck = 'asr_' + (state.bvid || state.videoId || state.aid || state.title);
@@ -3297,12 +3380,12 @@
     return segsAll;
   }
 
-  function sfChat(prompt) {
+  function aiChat(prompt) {
     return new Promise(function (resolve, reject) {
       GM_xmlhttpRequest({
         method: 'POST',
-        url: 'https://api.siliconflow.cn/v1/chat/completions',
-        headers: { 'Authorization': 'Bearer ' + SETTINGS.sfKey, 'Content-Type': 'application/json' },
+        url: aiBaseUrl() + '/' + aiEndpointPath('chat'),
+        headers: Object.assign({ 'Content-Type': 'application/json' }, aiAuthHeader()),
         data: JSON.stringify({ model: SETTINGS.translateModel, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }),
         timeout: 180000,
         onload: function (r) {
@@ -3334,7 +3417,7 @@
   }
   async function translateBody(body) {
     var myGen = asrGen;
-    if (!SETTINGS.sfKey) throw new Error('翻译需要配置硅基流动 API Key');
+    if (!SETTINGS.aiKey) throw new Error('翻译需要配置 AI API Key（⚙ 设置 → 选厂商并填入 Key）');
     var targetName = LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo;
     var out = [], BATCH = 120;
     for (var i = 0; i < body.length; i += BATCH) {
@@ -3342,7 +3425,7 @@
       var batch = body.slice(i, i + BATCH);
       var prompt = '你是专业字幕翻译。把下面 JSON 数组里每条 content 翻译成' + targetName + '，要求：1) from/to 字段原样保留；2) 只翻译 content，不增删条目；3) 直接输出 JSON 数组，不要任何多余文字。\n' +
         JSON.stringify(batch.map(function (x) { return { from: x.from, to: x.to, content: x.content }; }));
-      var resp = await sfChat(prompt);
+      var resp = await aiChat(prompt);
       if (state.asr) { state.asr.done = Math.floor(i / BATCH) + 1; render(); }
       var arr = parseTranslations(resp, batch.length);
       arr.forEach(function (x, k) {
@@ -3376,7 +3459,7 @@
   // （概括/删减/改序）直接整批拒绝。热词已把视频自身元数据喂给它当参照。
   async function runLlmCorrect() {
     if (!state.body || !state.body.length) { toast('请先获取字幕'); return; }
-    if (!SETTINGS.sfKey) { toast('LLM 纠错需要硅基流动 API Key（⚙ 设置）'); return; }
+    if (!SETTINGS.aiKey) { toast('LLM 纠错需要 AI API Key（⚙ 设置 → 选厂商并填入 Key）'); return; }
     var myGen = asrGen;
     state.loading = true; state.err = '';
     state.asr = { phase: 'LLM 纠错', stage: 'transcribe', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null, t0: Date.now() };
@@ -3388,7 +3471,7 @@
         if (asrStop(myGen)) break;
         var batch = state.body.slice(i, i + BATCH);
         var prompt = TranscriptQuality.buildCorrectionPrompt(batch, meta, SETTINGS.customHotwords || '');
-        var resp = await sfChat(prompt);
+        var resp = await aiChat(prompt);
         var result = TranscriptQuality.parseCorrectionResponse(resp, batch);   // 条目数/顺序不符会 throw，整批拒绝
         out = out.concat(result.body);
         changeCount += (result.changes || []).length;
@@ -3993,12 +4076,26 @@
       '    </div>' +
       '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）</div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
-      '      <label>硅基流动 API Key（无字幕转写 / 翻译用，cloud.siliconflow.cn 获取）</label>' +
+      '      <label>AI 厂商（决定 API 地址与推荐模型，可随时切换）</label>' +
+      '      <select id="bsrAiProvider">' +
+      '        <option value="siliconflow">硅基流动 SiliconFlow（推荐·有免费额度）</option>' +
+      '        <option value="openai">OpenAI</option>' +
+      '        <option value="deepseek">DeepSeek</option>' +
+      '        <option value="openrouter">OpenRouter</option>' +
+      '        <option value="custom">自定义 OpenAI 兼容端点</option>' +
+      '      </select>' +
+      '      <div id="bsrAiBaseWrap" style="display:none">' +
+      '        <label>自定义 API 根地址（如 https://your-host/v1，不含末尾 /）</label>' +
+      '        <input type="text" id="bsrAiBase" placeholder="https://..." autocomplete="off" />' +
+      '        <label>自定义音频转写端点（留空用 /audio/transcriptions）</label>' +
+      '        <input type="text" id="bsrAiAudioEp" placeholder="/audio/transcriptions" autocomplete="off" />' +
+      '      </div>' +
+      '      <label id="bsrKeyLabel">API Key（无字幕转写 / 翻译用）</label>' +
       '      <div class="bsr-keywrap">' +
       '        <input type="password" id="bsrKey" placeholder="sk-..." autocomplete="off" />' +
       '        <span class="eye" id="bsrEye">👁</span>' +
       '      </div>' +
-      '      <div class="bsr-inv">' +
+      '      <div class="bsr-inv" id="bsrInvBox">' +
       '        <div class="bsr-inv-t">🎁 新用户福利：用 GitHub 注册「硅基流动」送 <b>¥16 代金券</b>，跑 AI 转写完全够用</div>' +
       '        <div class="bsr-inv-r">' +
       '          <button type="button" class="bsr-inv-code" id="bsrInviteCopy">📋 邀请码 axOmWfWi（点击复制）</button>' +
@@ -4017,12 +4114,10 @@
       '        <option value="ko">韩文</option>' +
       '        <option value="yue">粤语</option>' +
       '      </select>' +
-      '      <label>转写模型</label>' +
-      '      <select id="bsrAsrModel">' +
-      '        <option value="FunAudioLLM/SenseVoiceSmall">SenseVoiceSmall（推荐·快）</option>' +
-      '        <option value="FunAudioLLM/SenseVoiceLarge">SenseVoiceLarge（更准）</option>' +
-      '      </select>' +
-      '      <div class="bsr-model-note">由「硅基流动」驱动 · <a href="https://cloud.siliconflow.cn/i/axOmWfWi" target="_blank" rel="noopener">GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）</a></div>' +
+      '      <label>转写模型（可点选预设，也可手填任意 OpenAI 兼容模型名）</label>' +
+      '      <input type="text" id="bsrAsrModel" list="bsrAsrModelList" placeholder="模型名" autocomplete="off" />' +
+      '      <datalist id="bsrAsrModelList"></datalist>' +
+      '      <div class="bsr-model-note" id="bsrAsrNote"></div>' +
       '      <label>分片时长（长视频转写）</label>' +
       '      <select id="bsrChunk">' +
       '        <option value="5">5 分钟/片</option>' +
@@ -4057,12 +4152,9 @@
       '        <option value="ru">俄文</option>' +
       '        <option value="ar">阿拉伯文</option>' +
       '      </select>' +
-      '      <label>翻译模型</label>' +
-      '      <select id="bsrTModel">' +
-      '        <option value="Qwen/Qwen2.5-72B-Instruct">Qwen2.5-72B（质量好）</option>' +
-      '        <option value="Qwen/Qwen2.5-7B-Instruct">Qwen2.5-7B（快省）</option>' +
-      '        <option value="deepseek-ai/DeepSeek-V3">DeepSeek-V3</option>' +
-      '      </select>' +
+      '      <label>翻译模型（可点选预设，也可手填任意 OpenAI 兼容模型名）</label>' +
+      '      <input type="text" id="bsrTModel" list="bsrTModelList" placeholder="模型名" autocomplete="off" />' +
+      '      <datalist id="bsrTModelList"></datalist>' +
       '      <label class="chk"><input type="checkbox" id="bsrPolishOn" /> 字幕增强：补标点 + 合并碎句 + 去重复行（免费·推荐）</label>' +
       '      <label class="chk"><input type="checkbox" id="bsrHotwordsOn" /> ASR 热词注入：拿视频标题/标签提升专名识别（免费）</label>' +
       '      <label>自定义热词（逗号分隔，叠加在自动热词上，如：蓝桥杯,STM32,寄存器）</label>' +
@@ -4239,7 +4331,10 @@
     };
     root.querySelector('#bsrInviteCopy').onclick = copyInviteCode;
     root.querySelector('#bsrSaveSet').onclick = function () {
-      SETTINGS.sfKey = root.querySelector('#bsrKey').value.trim();
+      SETTINGS.aiProvider = root.querySelector('#bsrAiProvider').value;
+      SETTINGS.aiKey = root.querySelector('#bsrKey').value.trim();
+      SETTINGS.aiBase = root.querySelector('#bsrAiBase').value.trim();
+      SETTINGS.aiAudioEp = root.querySelector('#bsrAiAudioEp').value.trim();
       SETTINGS.asrEnable = root.querySelector('#bsrAsrOn').checked;
       SETTINGS.asrFallback = root.querySelector('#bsrAsrFb').checked;
       SETTINGS.asrForce = root.querySelector('#bsrAsrForce').checked;
@@ -4264,6 +4359,39 @@
       applyTheme();
       toast('设置已保存');
       render();
+    };
+    // ---- v9.14.0 AI 厂商切换：切换预设时同步端点 / Key 提示 / 模型清单 / 邀请位 ----
+    function fillModelList(sel, models) {
+      var dl = root.querySelector(sel);
+      if (!dl) return;
+      dl.innerHTML = (models || []).map(function (m) { return '<option value="' + escHtml(m) + '"></option>'; }).join('');
+    }
+    function refreshProviderUI() {
+      var p = currentProvider();
+      var isCustom = SETTINGS.aiProvider === 'custom';
+      var baseWrap = root.querySelector('#bsrAiBaseWrap');
+      if (baseWrap) baseWrap.style.display = isCustom ? 'block' : 'none';
+      var keyLabel = root.querySelector('#bsrKeyLabel');
+      if (keyLabel) keyLabel.textContent = 'API Key（' + p.label + '，无字幕转写 / 翻译用）';
+      var keyInput = root.querySelector('#bsrKey');
+      if (keyInput) keyInput.placeholder = p.keyPlaceholder || 'sk-...';
+      var invBox = root.querySelector('#bsrInvBox');
+      if (invBox) invBox.style.display = (SETTINGS.aiProvider === 'siliconflow') ? 'block' : 'none';
+      fillModelList('#bsrAsrModelList', p.supportsAudio ? p.asrModels : []);
+      fillModelList('#bsrTModelList', p.chatModels);
+      var asrNote = root.querySelector('#bsrAsrNote');
+      if (asrNote) {
+        var parts = ['由「' + p.label + '」驱动'];
+        if (p.freeNote) parts.push(p.freeNote);
+        if (!p.supportsAudio) parts.push('（该厂商不支持语音转写，仅翻译可用）');
+        asrNote.innerHTML = escHtml(parts.join(' · '));
+      }
+    }
+    root.querySelector('#bsrAiProvider').onchange = function () {
+      SETTINGS.aiProvider = root.querySelector('#bsrAiProvider').value;
+      saveSettings();
+      refreshProviderUI();
+      toast('已切换 AI 厂商：' + currentProvider().label);
     };
     // ---- v9.2 Tab 切换 ----
     function switchTab(name) {
@@ -4418,7 +4546,10 @@
       else { search.expanded = i; render(); }
     };
     // 回填设置
-    root.querySelector('#bsrKey').value = SETTINGS.sfKey;
+    root.querySelector('#bsrAiProvider').value = SETTINGS.aiProvider;
+    root.querySelector('#bsrKey').value = SETTINGS.aiKey;
+    root.querySelector('#bsrAiBase').value = SETTINGS.aiBase || '';
+    root.querySelector('#bsrAiAudioEp').value = SETTINGS.aiAudioEp || '';
     root.querySelector('#bsrAsrOn').checked = SETTINGS.asrEnable;
     root.querySelector('#bsrAsrFb').checked = SETTINGS.asrFallback;
     root.querySelector('#bsrAsrForce').checked = SETTINGS.asrForce;
@@ -4429,6 +4560,7 @@
     root.querySelector('#bsrPlayRate').value = String(SETTINGS.asrPlayRate);
     root.querySelector('#bsrTrans').value = SETTINGS.translateTo;
     root.querySelector('#bsrTModel').value = SETTINGS.translateModel;
+    refreshProviderUI();
     root.querySelector('#bsrPolishOn').checked = SETTINGS.polishOn;
     root.querySelector('#bsrHotwordsOn').checked = SETTINGS.hotwordsOn;
     root.querySelector('#bsrLlmCorrect').checked = SETTINGS.llmCorrect;
@@ -4610,7 +4742,7 @@
     // 播放录制被自动播放策略拦截时显示「解锁」按钮
     $('#bsrUnlock').style.display = (state.asr && state.asr.unlock) ? 'inline-block' : 'none';
     // v9.2 LLM 纠错按钮：付费功能，仅在设置开启 + 有 Key + 有字幕时出现，不打扰默认用户
-    $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.sfKey && state.body && !state.loading) ? 'inline-block' : 'none';
+    $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.aiKey && state.body && !state.loading) ? 'inline-block' : 'none';
     // v9.2 搜索面板渲染。签名缓存：只有搜索状态真变了才重写列表，
     // 否则用户点开「评分理由」时每帧 render 都会重建 DOM，展开状态当场丢失。
     var sst = $('#bsrSearchStatus');

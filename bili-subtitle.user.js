@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.14.0
+// @version      9.15.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，A/B/C 三档可解释评分、权重面板可调、v9.5 起三档预设一键切换、点卡片看理由再打开）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -4095,6 +4095,7 @@
       '        <input type="password" id="bsrKey" placeholder="sk-..." autocomplete="off" />' +
       '        <span class="eye" id="bsrEye">👁</span>' +
       '      </div>' +
+      '      <button type="button" class="bsr-btn bsr-s" id="bsrAiTest" style="margin:6px 0 0;width:100%">测试连接（验证 Key 是否有效，不烧额度）</button>' +
       '      <div class="bsr-inv" id="bsrInvBox">' +
       '        <div class="bsr-inv-t">🎁 新用户福利：用 GitHub 注册「硅基流动」送 <b>¥16 代金券</b>，跑 AI 转写完全够用</div>' +
       '        <div class="bsr-inv-r">' +
@@ -4330,6 +4331,32 @@
       k.type = (k.type === 'password') ? 'text' : 'password';
     };
     root.querySelector('#bsrInviteCopy').onclick = copyInviteCode;
+    // v9.15.0 测试连接：对各厂商通用——GET {base}/models + Bearer，200 即 Key 有效，不烧额度。
+    // 读输入框的「未保存值」，让用户改完 Key 不用先点保存就能验。
+    root.querySelector('#bsrAiTest').onclick = function () {
+      var prov = root.querySelector('#bsrAiProvider').value || SETTINGS.aiProvider;
+      var key = root.querySelector('#bsrKey').value.trim() || SETTINGS.aiKey;
+      if (!key) { toast('先填 API Key 再测试'); return; }
+      var base = (prov === 'custom')
+        ? (root.querySelector('#bsrAiBase').value.trim() || SETTINGS.aiBase || '')
+        : (AI_PROVIDERS[prov] || AI_PROVIDERS.siliconflow).base;
+      base = (base || '').replace(/\/+$/, '');
+      if (!base) { toast('自定义厂商请先填 API 根地址'); return; }
+      toast('正在测试连接…');
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: base + '/models',
+        headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+        timeout: 20000,
+        onload: function (r) {
+          var label = (AI_PROVIDERS[prov] || AI_PROVIDERS.siliconflow).label;
+          if (r.status >= 200 && r.status < 300) toast('✅ ' + label + ' 连接成功，Key 有效');
+          else toast('❌ 连接失败：HTTP ' + r.status);
+        },
+        onerror: function () { toast('❌ 连接失败：网络错误'); },
+        ontimeout: function () { toast('❌ 连接超时'); }
+      });
+    };
     root.querySelector('#bsrSaveSet').onclick = function () {
       SETTINGS.aiProvider = root.querySelector('#bsrAiProvider').value;
       SETTINGS.aiKey = root.querySelector('#bsrKey').value.trim();

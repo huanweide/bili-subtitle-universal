@@ -3,7 +3,7 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.14.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.15.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -302,7 +302,7 @@ Edge / Chrome / Firefox 应用商店搜「Tampermonkey」一键安装。
 | 选项 | 说明 |
 |---|---|
 | AI 厂商 | 硅基流动（默认）/ OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，决定 API 地址与推荐模型 |
-| API Key | 当前厂商的 Key，只存本地；自定义端点还需填 API 根地址（与音频端点） |
+| API Key | 当前厂商的 Key，只存本地；填完点「测试连接」先验有效性，不烧额度；自定义端点还需填 API 根地址（与音频端点） |
 | 无字幕时自动转写 | 关掉则只提示，不自动开跑 |
 | 字幕获取失败时自动转写 | 官方接口失败兜底 |
 | 始终使用音频转写 | 无视自带字幕（适合字幕损坏的视频） |

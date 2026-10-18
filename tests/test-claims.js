@@ -164,6 +164,10 @@ claim('换厂商时模型清单与 Key 提示同步刷新（refreshProviderUI �
   has('refreshProviderUI') && has("'#bsrAiProvider'") && has('currentProvider'));
 claim('README 宣传了可切换 AI 厂商',
   /AI 厂商|厂商|OpenAI|DeepSeek|OpenRouter|自定义 OpenAI/.test(README));
+claim('设置里提供「测试连接」按钮，切厂商后先验 Key 再烧额度',
+  has("'#bsrAiTest'") && has("bsrAiTest") && has("'/models'"));
+claim('测试连接对各厂商通用（走 /models 端点，非写死某家）',
+  has("base \\+ '/models'") && has("'Authorization': 'Bearer ' \\+ key"));
 
 // ===================== 十、文档与实现对齐 =====================
 

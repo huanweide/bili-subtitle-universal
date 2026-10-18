@@ -17,6 +17,16 @@ var path = require('path');
 var SRC = fs.readFileSync(path.join(__dirname, '..', 'bili-subtitle.user.js'), 'utf8');
 var BUILD = fs.readFileSync(path.join(__dirname, '..', 'build.js'), 'utf8');
 
+// 提取 renderLines 的完整函数体：切到下一个顶层函数起始为止，不用固定长度切片——
+// 固定长度会随着注释/新增行悄悄不够长，把「字段名有没有写对」这种断言漏出去。
+function linesFnBody() {
+  var start = SRC.indexOf('function renderLines()');
+  if (start < 0) return '';
+  var endIdx = SRC.indexOf('\n  function ', start + 1);
+  return SRC.slice(start, endIdx > 0 ? endIdx : start + 2000);
+}
+var RL = linesFnBody();
+
 var passed = 0, failed = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log('[PASS] ' + name); }
@@ -192,8 +202,21 @@ test('C7 检索结果要告诉用户「筛掉了多少」（不然复制出去�
 
 test('C8 字幕区显示过滤后的内容（不是全文）— 行列表走 activeBody', function () {
   ok(/function renderLines\(\)/.test(SRC), '要有 renderLines');
-  var fn = SRC.slice(SRC.indexOf('function renderLines()'), SRC.indexOf('function renderLines()') + 320);
-  ok(/activeBody\(\)/.test(fn), '行列表渲染要走 activeBody（检索后只出命中行）');
+  ok(/activeBody\(\)/.test(RL), '行列表渲染要走 activeBody（检索后只出命中行）');
+});
+
+// v9.16.1 真事故：行列表把正文字段读成了一个不存在的 key → 每行渲染成空串，
+// 表现为「状态栏显示 ✅ N 句、复制也成功，但预览区一条字幕都看不见」。
+// 这类 bug 光断言「调用了 activeBody」拦不住，必须断言渲染用的字段名本身。
+test('C8b 行列表渲染正文必须读 content（全脚本 20+ 处构造点的统一字段）', function () {
+  ok(/\.content\b/.test(RL), '渲染正文要取 .content');
+  ok(!/\.text\b/.test(RL), 'renderLines 不得出现别的正文字段（代价是预览全空白）');
+});
+
+test('C8c 无字幕时隐藏「⏱ 时间轴」整块（没东西可偏移/裁剪，别挂着）', function () {
+  ok(/#bsrAxisToggle/.test(SRC), '要有时间轴折叠标题');
+  ok(/at\.style\.display = state\.body \? '' : 'none'/.test(SRC), '时间轴显隐要跟着 state.body');
+  ok(/if \(ab && !state\.body\) ab\.style\.display = 'none'/.test(SRC), '无字幕时连内容一起收起');
 });
 
 test('C9 快捷键：Alt+S 开合 / Esc 收起 / Ctrl+Enter 取字幕，且输入框内不抢键', function () {

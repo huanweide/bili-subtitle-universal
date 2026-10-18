@@ -3,7 +3,7 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.16.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.16.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -47,7 +47,7 @@
 | **稿子能直接变总结** | v9.10：「🧠 AI 总结提示词」四套现成模板，点了复制「提示词 + 稿子」，粘进任意 AI 对话框就出总结 / 要点 / 笔记 / 思考题 |
 | **字幕对不上能整体挪** | v9.11：时间轴整体偏移（可正负，不产生负时间戳、不把条目压成 0 秒）；「只保留当前播放位置之后」一键收窄 |
 | **宣传的每一条都有证据** | v9.9 新增「全功能验证矩阵」67 条：三站取字幕、四层转写防线、断点续传、评分筛选、三层质量、全部导出格式、安全隐私承诺——README 承诺的每一条都必须在源码里指到一行证据。**写了却没实现，测试直接红** |
-| **有测试兜底** | 单元测试 86 项 + 评分/质量 32 项 + 接线验证 79 项 + 路由/导出 25 条 + 主题/可见性 21 条 + 站点认领 15 条 + 检索/导出 50 条 + 功能验证矩阵 88 条 + 往返一致性 15 条，合计 411 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
+| **有测试兜底** | 单元测试 86 项 + 评分/质量 32 项 + 接线验证 79 项 + 路由/导出 25 条 + 主题/可见性 21 条 + 站点认领 15 条 + 检索/导出 52 条 + 功能验证矩阵 88 条 + 往返一致性 15 条，合计 413 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**。
 
@@ -390,16 +390,38 @@ v9.6 起默认只复制到剪贴板——多数人是要把文字贴给 AI，落
 ```bash
 node tests/run-tests.js      # 单元测试：MD5 / WBI / SRT / VTT / TTML / WAV / MIME / 选路 / 声道 / 长音频硬化 / 字幕解析正确性（86 项）
 node tests/test-scorer.js    # v9.1 新增：候选评分 / 搜索筛选纯函数 / 转写质量 / 断点续传状态层 / v9.5 权重预设行为矩阵，共 32 项断言
-node tests/test-wiring.js    # v9.2 新增：接线验证——模块函数有调用方 / UI 元素两侧都在 / 设置有持久化 / 版本号对齐，共 99 项断言
+node tests/test-wiring.js    # v9.2 新增：接线验证——模块函数有调用方 / UI 元素两侧都在 / 设置有持久化 / 版本号对齐，共 79 项断言
 node tests/test-route.js     # v9.6 新增：路由身份（锚点/追踪参数/换 P）+ 导出动作分派，25 条；含反向断言，旧的双触发与整条 href 比对一旦回潮立即红
 node tests/test-ui.js        # v9.7 新增：深色模式覆盖完整性 / FAB 可见文字 / 无障碍 / 交互反馈，21 条
 node tests/test-site.js      # v9.8 新增：站点与页面形态认领（B 站 7 种 + YouTube 6 种）/ 不认领清单 / 钓鱼域名 / URL 参数消毒，15 条
-node tests/test-sub.js       # v9.9 新增：字幕内检索 / VTT / MD 导出 / 快捷键 / 点击跳转 / AI 提示词 / 时间轴校正，50 条；反向断言防「导出绕过检索过滤」
-node tests/test-claims.js    # v9.9 新增：全功能验证矩阵——README 承诺的每一条都要能在源码里指到证据，73 条
+node tests/test-sub.js       # v9.9 新增：字幕内检索 / VTT / MD 导出 / 快捷键 / 点击跳转 / AI 提示词 / 时间轴校正 / 预览行字段，52 条；反向断言防「导出绕过检索过滤」「预览读错字段变全空」
+node tests/test-claims.js    # v9.9 新增：全功能验证矩阵——README 承诺的每一条都要能在源码里指到证据，88 条
 node tests/test-roundtrip.js # v9.12 新增：导出→再解析往返一致（SRT / VTT 写出来再读回来必须逐条相同），15 条
 node tests/check-docs.js     # 文档一致性门禁：README 的版本号/测试数必须和源码对得上（防手工改漏）
 node build.js                # 把 modules/*.js 同步进 bili-subtitle.user.js 的 build:modules 区
+node scripts/cdn-refresh.js  # ⚠️ 每次 push 后必跑：见下方「发布流程」
 node tests/serve.js          # 本地静态服务，端口 8765
+```
+
+### 发布流程（以后默认这么更新）
+
+1. 改代码 → 跑上面的测试电池 → `node --check bili-subtitle.user.js`
+2. bump `@version`（连 README 版本徽章 + CHANGELOG 一起改，`check-docs.js` 会卡漂流）
+3. `git commit` → `git push origin main`
+4. **`node scripts/cdn-refresh.js`** ← purge jsDelivr 缓存 + 校验 CDN 已服务到最新版本
+
+第 4 步不能省。jsDelivr 对 `@main` 分支标签有 **12 小时 CDN 缓存**（响应头 `s-maxage=43200`），刚 push 完新版本，`@main` 链接仍返回旧脚本——表现为「明明推上去了，用户装/自动更新拿到的还是旧版」。`cdn-refresh.js` 会调 `purge.jsdelivr.net` 强制刷新，再重试校验直到 CDN 版本号和本地 `@version` 一致（不相等就退出码 1）。
+
+线上安装链接（`@main`，自动更新机制依赖它）：
+
+```
+https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle.user.js
+```
+
+缓存死活刷不动时的应急方案——用固定 commit 地址（天然不受分支缓存影响）：
+
+```
+https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@<commit-sha>/bili-subtitle.user.js
 ```
 
 浏览器灰度页：

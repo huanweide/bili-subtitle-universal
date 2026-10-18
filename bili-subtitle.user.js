@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.16.0
+// @version      9.16.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，有字幕优先、评分引擎默认权重排序、点卡片直接打开视频）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）；新增「进入视频自动获取字幕并复制」开关（默认关）、字幕区改为可点击行列表（点行跳到对应时间，命中行高亮）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -4508,7 +4508,9 @@
       var hit = state.searchKw ? SubExport.searchBody([item], state.searchKw).matched : false;
       return '<div class="bsr-line' + (hit ? ' hit' : '') + '" data-from="' + (item.from || 0) + '">' +
         '<span class="bsr-ts">' + SubExport.fmtClock(item.from || 0) + '</span>' +
-        '<span class="bsr-tx">' + escHtml(item.text || '') + '</span></div>';
+        // v9.16.1 修：全脚本字幕行的正文字段统一是 content（20+ 处构造点都是它）。
+        // 曾经把这里写成别的关键字 → 每行渲染成空串，出现「复制成功但预览区全空白」。
+        '<span class="bsr-tx">' + escHtml(item.content || '') + '</span></div>';
     }).join('');
   }
 
@@ -4632,6 +4634,10 @@
     // v9.9 检索：文本框只显示命中行，命中数直接写在框上方（不用猜有没有筛掉东西）
     var fr = $('#bsrFindRow'), fi = $('#bsrFindInfo');
     if (fr) fr.style.display = state.body ? 'flex' : 'none';
+    // v9.16.1 没字幕时连带隐藏「⏱ 时间轴」整块：没有东西可偏移/裁剪，挂着就是无意义显示
+    var at = $('#bsrAxisToggle'), ab = $('#bsrAxisBox');
+    if (at) at.style.display = state.body ? '' : 'none';
+    if (ab && !state.body) ab.style.display = 'none';
     if (fi) {
       var res = state.body ? SubExport.searchBody(state.body, state.searchKw) : null;
       if (res && state.searchKw) {

@@ -1,0 +1,29 @@
+<!doctype html>
+<!--
+  fixture: YouTube 观看页（https://www.youtube.com/watch?v=dQw4w9WgXcQ）
+  依据：YouTube watch 页面真实结构 —— 播放器配置以 `var ytInitialPlayerResponse = {...}`
+  形式挂在 <script> 里（classic script，故 var 会挂到 window 上）；字幕轨道列表位于
+  captions.playerCaptionsTracklistRenderer.captionTracks[]，每项含 baseUrl / languageCode /
+  kind('asr' 表示自动生成) / name.simpleText / vssId。
+  真实字段（有把握）：videoDetails.{videoId,title,author,lengthSeconds}、
+  captions.playerCaptionsTracklistRenderer.captionTracks[].{baseUrl,languageCode,kind,name.simpleText,vssId}
+  推测字段（版本相关，不影响被测逻辑）：pot / xoaf / ipbits / key=yt8 / sparams 组合方式，
+  以及 defaultAudioTrackIndex、captionsInitialState 等额外键。
+-->
+<html lang="zh-CN" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title> Rick Astley - Never Gonna Give You Up (Official Music Video) - YouTube </title>
+<link rel="canonical" href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">
+</head>
+<body>
+<div id="page" class="watch">
+  <div id="player-container"><div id="player"></div></div>
+  <div id="info"><h1 class="title">Rick Astley - Never Gonna Give You Up (Official Music Video)</h1></div>
+</div>
+<script nonce="fixture-nonce">var ytInitialPlayerResponse = {"responseContext":{"serviceTrackingParams":[{"service":"CSI","params":[{"key":"c","value":"WEB"}]}]},"playabilityStatus":{"status":"OK","playableInEmbed":true},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Rick Astley - Never Gonna Give You Up (Official Music Video)","lengthSeconds":"212","keywords":["music"],"channelId":"UCuAXFkgsw1L7xaCfnd5JJOw","isOwnerViewing":false,"shortDescription":"fixture description","isCrawlable":true,"thumbnail":{"thumbnails":[{"url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg","width":480,"height":360}]},"allowRatings":true,"viewCount":"1500000000","author":"RickAstleyVEVO","isPrivate":false,"isUnpluggedCorpus":false,"isLiveContent":false},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=zh-CN&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_ZH&key=yt8&lang=zh-Hans","name":{"simpleText":"Chinese (Simplified)"},"vssId":".zh-Hans","languageCode":"zh-Hans","isTranslatable":true,"trackName":"中文（简体）"},{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=en&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_EN&key=yt8&kind=asr&lang=en","name":{"simpleText":"English (auto-generated)"},"vssId":"a.en","languageCode":"en","kind":"asr","isTranslatable":true,"trackName":"English (auto-generated)"},{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=ja&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_JA&key=yt8&lang=ja","name":{"simpleText":"Japanese"},"vssId":".ja","languageCode":"ja","isTranslatable":true,"trackName":"日本語"}],"defaultAudioTrackIndex":0}},"streamingData":{"expiresInSeconds":"21540","formats":[{"itag":18,"url":"https://rr1---sn-fixture.googlevideo.com/videoplayback?fake=1","mimeType":"video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"","bitrate":500000,"width":640,"height":360}]},"microformat":{"playerMicroformatRenderer":{"thumbnail":{"thumbnails":[{"url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg","width":480,"height":360}]},"title":{"simpleText":"Rick Astley - Never Gonna Give You Up"},"description":{"simpleText":"fixture"},"lengthSeconds":"212","ownerChannelName":"RickAstleyVEVO","externalChannelId":"UCuAXFkgsw1L7xaCfnd5JJOw","category":"Music","publishDate":"2009-10-25","uploadDate":"2009-10-25","viewCount":"1500000000"}}};</script>
+<script nonce="fixture-nonce">var ytInitialData = {"responseContext":{},"contents":{}};</script>
+<script nonce="fixture-nonce">var ytcfg = {d: function(){return '';}};</script>
+</body>
+</html>

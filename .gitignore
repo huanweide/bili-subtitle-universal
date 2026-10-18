@@ -55,3 +55,6 @@ pip.conf
 .workbuddy/
 .loop-state.json
 *.local
+# === 验证过程产物（脚本/报告/fixtures 入库，截图与结果 json 不入库） ===
+scripts/verify/shots/
+scripts/verify/*.json

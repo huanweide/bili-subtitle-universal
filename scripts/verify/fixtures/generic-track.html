@@ -1,0 +1,16 @@
+<!doctype html>
+<!--
+  fixture: 通用站点 A —— 页面里有 <video> + <track kind="captions" src="*.vtt">
+  目的：验证 html5 适配器的「DOM <track> + WebVTT 下载解析」路径（脚本 README 声称支持任意站点）。
+  真实结构：HTML5 标准写法，<track kind="captions|subtitles" src srclang label>，
+  VTT 文件由同源 HTTP 服务提供（MIME text/vtt）。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>通用站点 · 带 WebVTT 轨道的页面</title></head>
+<body>
+<h1>通用站点字幕测试</h1>
+<video id="v1" controls width="480" preload="metadata">
+  <track kind="captions" src="generic-sub.vtt" srclang="zh" label="中文" default>
+</video>
+</body>
+</html>

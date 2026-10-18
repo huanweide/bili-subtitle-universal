@@ -1,0 +1,24 @@
+<!doctype html>
+<!--
+  fixture: 通用站点 B —— DOM 里没有 <track>，字幕由 JS 用 video.addTextTrack() 挂上去
+  （video.js / Plyr / DPlayer / 各类课件播放器的常见做法）。
+  目的：验证 html5 适配器的 v9.13「video.textTracks 内存字幕轨道」路径。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>通用站点 · JS 挂 textTracks 的页面</title></head>
+<body>
+<h1>通用站点 textTracks 测试</h1>
+<video id="v1" controls width="480" preload="metadata"></video>
+<script>
+(function () {
+  var v = document.getElementById('v1');
+  var t = v.addTextTrack('captions', '中文（内存轨道）', 'zh');
+  t.mode = 'showing';
+  t.addCue(new VTTCue(1, 4, '内存轨道第一句'));
+  t.addCue(new VTTCue(4, 7, '内存轨道第二句'));
+  t.addCue(new VTTCue(7, 10, '内存轨道第三句 <b>带标签</b>'));
+  window.__TEXTTRACK_READY__ = true;
+})();
+</script>
+</body>
+</html>

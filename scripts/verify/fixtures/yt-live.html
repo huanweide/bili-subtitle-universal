@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  fixture: YouTube 直播（https://www.youtube.com/live/dQw4w9WgXcQ）
+  依据：直播页 videoDetails.isLiveContent = true，同样挂 var ytInitialPlayerResponse。
+  说明：真实直播流绝大多数没有 captionTracks（字幕是实时 ASR，走别的通道），
+  这里仍放一条人工字幕轨，用来测「/live/ 形态能不能被认领并走完 YouTube 分支」——
+  这是纯 URL 形态验证，不代表真实直播一定拿得到字幕（报告里会标注）。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>直播中 · 测试频道 - YouTube</title></head>
+<body>
+<div id="player"></div>
+<script nonce="fixture-nonce">var ytInitialPlayerResponse = {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"直播中 · 测试频道","lengthSeconds":"0","author":"TestChannel","isLiveContent":true},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=zh-CN&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_ZH&key=yt8&lang=zh-Hans","name":{"simpleText":"Chinese (Simplified)"},"vssId":".zh-Hans","languageCode":"zh-Hans","isTranslatable":true,"trackName":"中文（简体）"}]}}};</script>
+</body>
+</html>

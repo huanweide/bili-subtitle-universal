@@ -69,7 +69,8 @@ test('U3 亮色里写死深字的选择器，暗色层必须逐条接管', funct
 test('U4 主要交互区在暗色下都要可读（输入/文本域/列表/设置/实时流/进度）', function () {
   ['.bsr-ta', '.bsr-input', '.bsr-sel', '.bsr-res', '.bsr-res-m', '.bsr-setbox', '.bsr-live',
    '.bsr-meta', '.bsr-chunks', '.bsr-bar', '.bsr-title', '.bsr-tab', '.bsr-empty',
-   '.bsr-wbox textarea', '.bsr-wpresets button', '#bsr-toast'].forEach(function (sel) {
+   // v9.16.2：.bsr-wbox / .bsr-wpresets 的 CSS 已随死 UI 一起删掉，这里换成仍在用的元素
+   '.bsr-findinfo', '.bsr-pbox input[type=number]', '#bsr-toast'].forEach(function (sel) {
     ok(darkHas(sel), '暗色层缺 ' + sel);
   });
 });

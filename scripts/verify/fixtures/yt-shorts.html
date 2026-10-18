@@ -1,0 +1,14 @@
+<!doctype html>
+<!--
+  fixture: YouTube Shorts（https://www.youtube.com/shorts/dQw4w9WgXcQ）
+  依据：Shorts 页同样挂 var ytInitialPlayerResponse（real page 里还有 ytInitialData 的
+  reelPlayerHeaderRenderer），videoDetails.videoId 与地址栏一致。
+  裁剪说明同 yt-embed.html：只保留被测逻辑真正会读的 videoDetails 与 captions。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Rick Astley - Never Gonna Give You Up #shorts - YouTube</title></head>
+<body>
+<div id="player"></div>
+<script nonce="fixture-nonce">var ytInitialPlayerResponse = {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Rick Astley - Never Gonna Give You Up #shorts","lengthSeconds":"212","author":"RickAstleyVEVO","isLiveContent":false},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=zh-CN&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_ZH&key=yt8&lang=zh-Hans","name":{"simpleText":"Chinese (Simplified)"},"vssId":".zh-Hans","languageCode":"zh-Hans","isTranslatable":true,"trackName":"中文（简体）"}]}}};</script>
+</body>
+</html>

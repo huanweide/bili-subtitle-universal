@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.16.1
+// @version      9.17.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，有字幕优先、评分引擎默认权重排序、点卡片直接打开视频）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）；新增「进入视频自动获取字幕并复制」开关（默认关）、字幕区改为可点击行列表（点行跳到对应时间，命中行高亮）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1484,6 +1484,8 @@
     body: null,        // 当前字幕 body 数组 [{from,to,content}]
     lan: '',
     loading: false, err: '', noSub: false,
+    ytBlocked: '',     // YouTube 明确拒绝播放时的官方原因（playabilityStatus.reason）
+    subNeedLogin: false, // B站：该视频的字幕登录后才能看（need_login_subtitle）
     asr: null,         // {phase, done, total, cancel, progress, chunks, eta, t0}
     asrRan: false,
     audioBlob: null,   // 已下载的音频 blob（复用）
@@ -1782,7 +1784,12 @@
     wbiLoading = gx('https://api.bilibili.com/x/web-interface/nav', { timeout: 8000, retries: 2, referer: 'https://www.bilibili.com/' })
       .then(JSON.parse)
       .then(function (d) {
-        if (d.code !== 0 || !d.data || !d.data.wbi_img || !d.data.wbi_img.img_url) throw new Error('获取 wbi key 失败 code=' + d.code);
+        // 只看密钥本身在不在，不看 code：未登录时 nav 返回 code=-101（"账号未登录"），
+        // 但 wbi_img / wbi_sub 照样完整下发。以前要求 code===0，未登录就直接 throw，
+        // wbi 签名等于从来没生效过（@description 里却在宣传它）。
+        if (!d || !d.data || !d.data.wbi_img || !d.data.wbi_img.img_url || !d.data.wbi_img.sub_url) {
+          throw new Error('获取 wbi key 失败 code=' + ((d && d.code) != null ? d.code : '无响应'));
+        }
         wbiCache.img = d.data.wbi_img.img_url.split('/').pop().split('.')[0];
         wbiCache.sub = d.data.wbi_img.sub_url.split('/').pop().split('.')[0];
         wbiCache.t = Date.now();
@@ -1879,7 +1886,17 @@
     var attrRe = /([A-Za-z:]+)\s*=\s*"([^"]*)"/g;
     var m;
     try {
-      while ((m = tagRe.exec(String(xmlText))) !== null) {
+      // ① 先剥掉 XML 注释：有些源在 <!-- --> 里塞了示例/广告文本节点，
+      //    不剥就会被当成真字幕解析出来（凭空多出几句不属于视频的话）。
+      // ② 只在 <body> 内匹配：<head> 里的 <p> 通常是样式/元信息，不是字幕。
+      var src = String(xmlText).replace(/<!--[\s\S]*?-->/g, '');
+      var bIdx = src.search(/<body\b/i);
+      if (bIdx >= 0) {
+        var rest = src.slice(bIdx);
+        var bEnd = rest.search(/<\/body\s*>/i);
+        src = (bEnd >= 0) ? rest.slice(0, bEnd) : rest;
+      }
+      while ((m = tagRe.exec(src)) !== null) {
         var attrs = {}, am;
         attrRe.lastIndex = 0;
         while ((am = attrRe.exec(m[2])) !== null) attrs[am[1].toLowerCase()] = am[2];
@@ -1995,7 +2012,12 @@
         else if (d.code === -403) msg += '（接口风控，稍后重试或启用 AI 转写）';
         throw new Error(msg);
       }
-      var list = (d.data && d.data.subtitle && d.data.subtitle.subtitles) || [];
+      var subRoot = (d.data && d.data.subtitle) || {};
+      // B站会给「登录之后才给字幕」的视频打 need_login_subtitle 这个标。
+      // 以前完全没读它，于是这类视频一律表现成「本视频无字幕」，
+      // 界面还顺手提示去烧 AI 转写——其实只要登录一下就有现成字幕。
+      state.subNeedLogin = !!subRoot.need_login_subtitle;
+      var list = subRoot.subtitles || [];
       var byLan = {};
       list.forEach(function (s) {
         var url = s.subtitle_url;
@@ -2043,10 +2065,24 @@
       if (vm) state.videoId = vm[1];
       // playerResponse 与地址栏不一致 = 陈旧对象 → 其字幕轨道不可信（可能属于上个视频），丢弃
       var stale = !!(vm && vd.videoId && vm[1] !== vd.videoId);
-      if (vd.title) state.title = vd.title;
-      if (vd.author) state.up = vd.author;
-      if (vd.lengthSeconds) state.duration = Number(vd.lengthSeconds) || 0;
+      if (stale) {
+        // 标题 / UP 主 / 时长同样属于上一个视频，必须一并清掉。
+        // 以前只清了字幕轨道，结果导出文件名顶着上一条视频的名字（串台）。
+        state.title = ''; state.up = ''; state.duration = 0;
+      } else {
+        if (vd.title) state.title = vd.title;
+        if (vd.author) state.up = vd.author;
+        if (vd.lengthSeconds) state.duration = Number(vd.lengthSeconds) || 0;
+      }
       if (!state.title) { try { state.title = document.title.replace(/\s*-\s*YouTube$/, '').trim(); } catch (e) {} }
+      // YouTube 拒绝播放（登录墙 / 年龄限制 / 版权 / 私有 / 地区限制）时，
+      // 官方把原因写在 playabilityStatus.reason 里。以前根本没读它，
+      // 一律落到「本视频无字幕」，用户以为是自己没开字幕，其实这视频压根播不了。
+      var ps = yt.playabilityStatus || {};
+      var pStatus = String(ps.status || '');
+      var pReason = typeof ps.reason === 'string' ? ps.reason
+        : ((ps.reason && (ps.reason.simpleText || ps.reason.runs)) ? String(ps.reason.simpleText || '') : '');
+      state.ytBlocked = (!pStatus || pStatus === 'OK') ? '' : ('YouTube 拒绝播放：' + (pReason || pStatus));
       var cap = yt.captions && yt.captions.playerCaptionsTracklistRenderer;
       var tracks = (cap && cap.captionTracks) || [];
       if (stale) tracks = [];   // 陈旧 playerResponse：不信任其字幕轨道
@@ -2375,7 +2411,9 @@
     return out;
   }
 
-  var MAX_SINGLE = 40 * 1024 * 1024;   // 单次直传上限
+  // OpenAI / OpenRouter 的 /audio/transcriptions 硬上限都是 25MB，超过直接 413。
+  // 以前写 40MB：25~40MB 的文件会老老实实传完再被拒，白等一次上传。
+  var MAX_SINGLE = 25 * 1024 * 1024;   // 单次直传上限
   // v8.2.0 核心改动：解码目标采样率直接设成 16000 单声道。
   // 旧版用 44100 双声道解码，3 小时音频解出约 3.8GB PCM，内存必爆，只能退回「播放录制」（要真放 13 分钟）；
   // 改 16000 单声道后同样内容只占约 691MB（省 5.5 倍），3 小时音频可走「快路」直接解码切片，几十秒出结果。
@@ -2457,7 +2495,8 @@
       audio: '/audio/transcriptions', chat: '/chat/completions',
       supportsAudio: true, supportsHotwords: true,
       keyPlaceholder: 'sk-...',
-      asrModels: ['FunAudioLLM/SenseVoiceSmall', 'FunAudioLLM/SenseVoiceLarge'],
+      // 官方只提供 SenseVoiceSmall，Large 从来不存在——填了就是 404，别再给用户选
+      asrModels: ['FunAudioLLM/SenseVoiceSmall'],
       chatModels: ['Qwen/Qwen2.5-72B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3', 'moonshotai/Kimi-K2-Instruct'],
       freeNote: 'GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）'
     },
@@ -2481,10 +2520,14 @@
     openrouter: {
       label: 'OpenRouter',
       base: 'https://openrouter.ai/api/v1',
-      audio: null, chat: '/chat/completions',
-      supportsAudio: false, supportsHotwords: false,
+      // 官方有专门的 /audio/transcriptions（multipart ≤25MB），不是「不支持转写」。
+      // 以前标成不支持，等于把一条能用的路堵死，还告诉用户「别点」。
+      audio: '/audio/transcriptions', chat: '/chat/completions',
+      supportsAudio: true, supportsHotwords: false,
       keyPlaceholder: 'sk-or-...',
-      chatModels: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-haiku', 'google/gemini-flash-1.5', 'meta-llama/llama-3.1-8b-instruct']
+      asrModels: ['openai/whisper-1', 'openai/gpt-4o-mini-transcribe', 'openai/gpt-4o-transcribe'],
+      // claude-3.5-haiku / gemini-flash-1.5 已下线，换成现在在售的对应档位
+      chatModels: ['openai/gpt-4o-mini', 'anthropic/claude-haiku-4.5', 'google/gemini-2.5-flash', 'meta-llama/llama-3.1-8b-instruct']
     },
     custom: {
       label: '自定义 OpenAI 兼容',
@@ -2509,6 +2552,18 @@
     return (ep || '').replace(/^\/+/, '');
   }
   function aiAuthHeader() { return { 'Authorization': 'Bearer ' + (SETTINGS.aiKey || '') }; }
+  // 拼真实请求地址。两件事必须挡住：
+  // ① 自定义厂商没填根地址时，'/chat/completions' 会被浏览器当成相对路径，
+  //    直接打到当前页面自己的域名上（必然失败，且报错看不出是没填地址），所以要明确报错。
+  // ② 端点里填了完整 URL（https://...）时直接用它，不再拼 base，
+  //    否则会出现 https://my-host/v1/https://other/audio 这种畸形地址。
+  function aiUrl(kind) {
+    var ep = aiEndpointPath(kind);
+    if (/^https?:\/\//i.test(ep)) return ep;
+    var base = aiBaseUrl();
+    if (!base) throw new Error('自定义厂商还没填 API 根地址（⚙ 设置 → 「自定义 API 根地址」，例如 https://your-host/v1）');
+    return base + '/' + ep;
+  }
 
   // ===================== AI 语音转写 =====================
   // v9.2 热词注入：词全部来自视频自身元数据（标题/UP主/分区/标签/简介）+ 用户自定义，
@@ -2525,7 +2580,7 @@
     return new Promise(function (resolve, reject) {
       var p = currentProvider();
       if (!p.supportsAudio) {
-        reject(new Error('当前厂商「' + p.label + '」不支持语音转写，请改用硅基流动 / OpenAI，或在「自定义」里填音频端点'));
+        reject(new Error('当前厂商「' + p.label + '」没有语音转写端点，请到 ⚙ 设置切换为硅基流动 / OpenAI / OpenRouter，或在「自定义」里填音频端点'));
         return;
       }
       var fd = new FormData();
@@ -2535,18 +2590,25 @@
       // 热词是硅基流动专属增强；其它厂商（OpenAI/DeepSeek/OpenRouter/自定义）没有该参数，不能瞎塞否则 4xx。
       var hotwords = (p.supportsHotwords) ? currentHotwords() : [];
       if (hotwords.length) fd.append('hotwords', JSON.stringify(hotwords));
-      fd.append('response_format', 'srt');
+      // response_format 只在确认支持的组合下才发：whisper 系列认 srt；
+      // OpenAI 的 gpt-4o-transcribe / gpt-4o-mini-transcribe 官方只认 json、text；
+      // OpenRouter 文档写明 text/srt/vtt 一律 400；硅基流动契约里根本没有这个参数。
+      // 对不支持的端点乱发一个值 = 稳稳收到一个 400，白烧一次请求。宁可不发。
+      if (SETTINGS.aiProvider === 'openai' && /^whisper/i.test(SETTINGS.asrModel || '')) fd.append('response_format', 'srt');
       GM_xmlhttpRequest({
         method: 'POST',
-        url: aiBaseUrl() + '/' + aiEndpointPath('audio'),
+        url: aiUrl('audio'),
         headers: aiAuthHeader(),
         data: fd,
         timeout: 300000,
         onload: function (r) {
           if (r.status >= 200 && r.status < 300) { resolve(r.responseText); return; }
-          // 带热词被拒（4xx 且错误体提到热词/参数）→ 脱裤重试一次（仅硅基流动会进这里）
+          // 带热词被拒（4xx 且错误体明确点名热词/该参数）→ 去掉热词重试一次（仅硅基流动会进这里）
+          // 注意：这里不能再写 param|invalid 这类泛化词。模型名写错时接口也回
+          // "invalid parameter"，一旦命中就被误判成「账号不支持热词」，把用户好好开着的热词
+          // 开关悄悄关掉，还 toast 说是热词的锅——真正的错误（模型名无效）反而被吞了。
           if (hotwords.length && r.status >= 400 && r.status < 500 &&
-              /hotword|热词|parameter|param|unsupported|invalid/i.test(String(r.responseText || ''))) {
+              /hotword|热词|unsupported/i.test(String(r.responseText || ''))) {
             hotwordsFallbackDone = true;
             SETTINGS.hotwordsOn = false; saveSettings();
             log('热词参数不被支持，已自动降级并关闭热词开关');
@@ -2563,13 +2625,48 @@
   }
   async function transcribeWav(blob, fileName) {
     var text = await aiTranscribe(blob, fileName);
-    if (/^\s*\{/.test(text)) {
-      try {
-        var j = JSON.parse(text);
-        if (j && j.error) throw new Error('ASR 接口错误：' + ((j.error.message || j.error.code) || ''));
-      } catch (e) { if (e.message && e.message.indexOf('ASR 接口错误') === 0) throw e; }
-    }
+    if (!String(text == null ? '' : text).trim()) throw new Error('转写接口返回了空响应（HTTP 2xx 但没有内容）');
     return text;
+  }
+
+  // ===================== 转写响应 → 字幕段（v9.16.2 重点修「谎报成功」） =====================
+  // 硅基流动 / OpenRouter / OpenAI 默认返回的都是 JSON：{"text":"......"}。
+  // 旧代码把它整个丢给 parseSrt → 一条都解析不出来 → 落到 splitTextByTime，
+  // 在 0~时长里均匀铺出一串时间戳。界面显示「✅ N 句 · ASR」，看着成功了，
+  // 但每一个时间都是编出来的。现在：先按 SRT 解析（有真时间戳就用真的），
+  // 否则剥 JSON 拿纯文本；真拿到文字才允许按长度估算时间轴（并如实标记 estTs）。
+  // 返回值：字符串 = 拿到的正文（可能是空串）；null = 这响应压根认不出来，由调用方报错。
+  function extractAsrText(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;                                        // 真·空响应 ≠「这段没人说话」
+    if (s.charAt(0) !== '{' && s.charAt(0) !== '[') return s;   // 裸文本 / SRT，原样返回
+    try {
+      var j = JSON.parse(s);
+      if (j && j.error) throw new Error('ASR 接口错误：' + ((j.error && (j.error.message || j.error.code)) || String(j.error).slice(0, 120)));
+      var cand = [j && j.text, j && j.result, j && j.transcript, j && j.transcription, j && j.data && j.data.text];
+      for (var i = 0; i < cand.length; i++) {
+        // 找到文本字段就返回（哪怕是空串：「这段是纯音乐」也是一种正经结果）
+        if (typeof cand[i] === 'string') return cand[i].trim();
+      }
+      // 少数网关走对话式返回：choices[0].message.content
+      if (j && j.choices && j.choices[0] && j.choices[0].message) return String(j.choices[0].message.content || '').trim();
+      return null;
+    } catch (e) {
+      if (e && e.message && e.message.indexOf('ASR 接口错误') === 0) throw e;
+      return null;   // 解析不了 = 认不出这个响应，交给调用方报错
+    }
+  }
+  // raw：接口原样响应；start/end：这段音频在整条视频里的真实时间窗（0 基，调用方再加偏移）
+  function asrToSegments(raw, start, end) {
+    var segs = parseSrt(String(raw == null ? '' : raw));
+    if (segs.length) return segs;
+    var txt = extractAsrText(raw);
+    if (txt === null) throw new Error('转写接口响应无法识别，未生成任何字幕（响应开头：' + String(raw == null ? '' : raw).trim().slice(0, 60).replace(/\s+/g, ' ') + '）');
+    // 接口说「这段没有语音内容」（纯音乐/静音）→ 跳过这一段。
+    // 绝不能拿空串去铺时间戳，那样会凭空多出一句空白字幕。
+    if (!txt) return [];
+    asrEstTs = true;   // 接口没给时间戳：只能按文本长度估算，完成后会如实提示用户
+    return splitTextByTime(txt, start, end);
   }
 
   function markChunk(idx, st) { if (state.asr && state.asr.chunks && state.asr.chunks[idx]) state.asr.chunks[idx].state = st; render(); }
@@ -2579,6 +2676,7 @@
     state.asr.eta = Math.round((elapsed / done) * Math.max(0, state.asr.total - done));
   }
   var asrGen = 0;   // 世代号：SPA 切视频 +1，旧 ASR 任务据此判定过期（stale），不再污染新视频
+  var asrEstTs = false;   // 本轮转写里是否有「接口只给纯文本、没给时间戳」的情况（时间轴是估算的，要告诉用户）
   function asrStop(myGen) { return myGen !== asrGen || !!(state.asr && state.asr.cancel); }
   function finishAsr() { state.asr = null; state.loading = false; cleanupAudio(); render(); }
 
@@ -2592,7 +2690,7 @@
     var myGen = asrGen;
     state.asrRan = true;
     if (!currentProvider().supportsAudio) {
-      state.err = '当前 AI 厂商「' + currentProvider().label + '」不支持语音转写，请到 ⚙ 设置切换为硅基流动 / OpenAI，或在「自定义」里填音频端点';
+      state.err = '当前 AI 厂商「' + currentProvider().label + '」没有语音转写端点（如 DeepSeek 只做对话），请到 ⚙ 设置切换为硅基流动 / OpenAI / OpenRouter，或在「自定义」里填音频端点';
       state.loading = false; render(); return;
     }
     if (!SETTINGS.aiKey) {
@@ -2605,7 +2703,7 @@
       state.body = cache[ck]; state.lan = 'ASR·缓存';
       state.loading = false; render(); toast('已使用上次转写结果'); return;
     }
-    state.loading = true; state.err = '';
+    state.loading = true; state.err = ''; asrEstTs = false;
     state.asr = { phase: '获取音频流', done: 0, total: 0, cancel: false, progress: null, chunks: [], eta: 0, t0: Date.now() };
     render();
     try {
@@ -2642,16 +2740,14 @@
 
       var body = [];
 
-      // ① 音频不大（≤40MB）：整段直传（原始格式，不解码，快）
+      // ① 音频不大（≤25MB）：整段直传（原始格式，不解码，快）
       if (blob.size <= MAX_SINGLE) {
         state.asr.stage = 'transcribe';
         state.asr.phase = 'AI 转写（整段直传）'; state.asr.total = 1; state.asr.done = 0; render();
         try {
           var text0 = await transcribeWav(blob, 'audio.m4a');
-          var segs0 = parseSrt(text0);
           var dur0 = state.duration || 0;
-          if (!segs0.length) segs0 = splitTextByTime(text0, 0, dur0 || 1);
-          body = segs0;
+          body = asrToSegments(text0, 0, dur0 || 1);
         } catch (e) {
           if (/(401|Authentication|api[ -]?key)/i.test(e.message)) throw e;
           log('整段直传失败，自动切换分片转写', e);
@@ -2746,8 +2842,9 @@
             }
             throw e;
           }
-          var segs = parseSrt(text);
-          if (!segs.length) segs = splitTextByTime(text, i2 * chunkDur, Math.min(dur, (i2 + 1) * chunkDur));
+          // 注意：这里给的是 0 基窗口（0 ~ 本片时长），下面统一加 i2*chunkDur 偏移。
+          // 旧代码把片起点直接传进 splitTextByTime 又加了一次偏移 = 时间戳整体翻倍后移。
+          var segs = asrToSegments(text, 0, Math.min(chunkDur, dur - i2 * chunkDur));
           segs.forEach(function (s) { s.from += i2 * chunkDur; s.to += i2 * chunkDur; });
           markChunk(i2, 'done');
           body = body.concat(segs);
@@ -2778,13 +2875,16 @@
       merged.incomplete = !!(body && body.incomplete);   // 录制中途收尾时如实标记，界面会提示「字幕可能不完整」
       // ASR 输出是重灾区：滚动自动字幕每条都带上一句尾巴 + 通篇无标点，落定前必须过去重补标点
       merged = maybePolish(merged);
+      // 接口没给时间戳 → 如实标记，界面会提示「时间轴为估算」，不假装是精确时间轴
+      merged.estTs = asrEstTs;
       state.body = merged;
       state.lan = 'ASR·' + (SETTINGS.asrLang === 'auto' ? '自动' : (LANG_NAMES[SETTINGS.asrLang] || SETTINGS.asrLang));
       cache[ck] = merged;
       var spentSec = state.asr.t0 ? Math.round((Date.now() - state.asr.t0) / 1000) : 0;
       cleanupAudio();
       state.asr = null; state.loading = false; render();
-      toast('已生成 ' + merged.length + ' 句转写字幕（用时 ' + fmtDur(spentSec) + '）');
+      toast('已生成 ' + merged.length + ' 句转写字幕（用时 ' + fmtDur(spentSec) + '）'
+        + (asrEstTs ? ' · ⚠ 接口未返回时间戳，时间轴为估算' : ''));
       notifyDone('字幕转写完成', (state.title || '视频') + ' · ' + merged.length + ' 句 · 用时 ' + fmtDur(spentSec));
     } catch (e) {
       log(e);
@@ -2803,8 +2903,7 @@
       var rendered = await renderChunk(audioBuf, start, dur, 16000);
       var wav = wavFromBuffer(rendered);
       var text = await transcribeWav(wav, 'chunk.wav');
-      var s2 = parseSrt(text);
-      if (!s2.length) s2 = splitTextByTime(text, start, start + dur);
+      var s2 = asrToSegments(text, 0, dur);
       s2.forEach(function (s) { s.from += start; s.to += start; });
       return s2;
     } catch (e) {
@@ -3029,8 +3128,8 @@
       var txt = await transcribeWav(wav, 'seg.wav');
       if (asrStop(myGen)) break;
 
-      var segs = parseSrt(txt);
-      if (!segs.length) segs = splitTextByTime(txt, b.startSec, b.endSec);
+      // 0 基窗口：批起点由下面统一加上（sidx 给的精确时间）
+      var segs = asrToSegments(txt, 0, b.endSec - b.startSec);
       segs.forEach(function (x) { x.from += b.startSec; x.to += b.startSec; });   // 批起点是 sidx 给的精确时间
       segsAll = segsAll.concat(segs);
       if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'done';
@@ -3269,7 +3368,8 @@
                 var halfN = Math.floor(c.samples.length / 2);
                 var segX = await transcribeWav(pcm16kToWav(c.samples.subarray(0, halfN)), 'rec.wav');
                 var segY = await transcribeWav(pcm16kToWav(c.samples.subarray(halfN)), 'rec.wav');
-                txt = segX + '\n' + segY;
+                // 先各自剥出文本再拼：两份 JSON 直接连起来是非法 JSON，会整段变成「没拿到文字」
+                txt = extractAsrText(segX) + '\n' + extractAsrText(segY);
               } catch (e2) {
                 if (asrStop(myGen)) break;
                 throw e2;
@@ -3278,8 +3378,8 @@
           }
           // 网络返回后再查一次取消/切视频：被丢弃的切片绝不混入结果、不刷新 UI
           if (asrStop(myGen)) break;
-          var segs = parseSrt(txt);
-          if (!segs.length) segs = splitTextByTime(txt, c.startOrig, c.startOrig + c.wavDur * c.kk);
+          // 0 基窗口：起点与倍速缩放由下面统一施加
+          var segs = asrToSegments(txt, 0, c.wavDur);
           segs.forEach(function (s) { s.from = c.startOrig + s.from * c.kk; s.to = c.startOrig + s.to * c.kk; });
           segsAll = segsAll.concat(segs);
           state.asr.done = (state.asr.done || 0) + 1;
@@ -3380,19 +3480,25 @@
     return segsAll;
   }
 
+  var aiTruncated = false;   // 最近一次 AI 对话是否因模型长度上限被截断（译文会悄悄少几行，必须报给用户）
   function aiChat(prompt) {
     return new Promise(function (resolve, reject) {
       GM_xmlhttpRequest({
         method: 'POST',
-        url: aiBaseUrl() + '/' + aiEndpointPath('chat'),
+        url: aiUrl('chat'),
         headers: Object.assign({ 'Content-Type': 'application/json' }, aiAuthHeader()),
-        data: JSON.stringify({ model: SETTINGS.translateModel, messages: [{ role: 'user', content: prompt }], temperature: 0.2 }),
+        // max_tokens 必带：不带就是听凭模型默认上限，译文被截断后我们只能眼睁睁少给几行
+        data: JSON.stringify({ model: SETTINGS.translateModel, messages: [{ role: 'user', content: prompt }], temperature: 0.2, max_tokens: 8192 }),
         timeout: 180000,
         onload: function (r) {
           if (r.status >= 200 && r.status < 300) {
             try {
               var d = JSON.parse(r.responseText);
-              if (d.choices && d.choices[0] && d.choices[0].message) resolve(d.choices[0].message.content || '');
+              if (d.choices && d.choices[0] && d.choices[0].message) {
+                // finish_reason=length = 真的写到上限被砍断了，不是模型自己收的尾
+                if (d.choices[0].finish_reason === 'length') aiTruncated = true;
+                resolve(d.choices[0].message.content || '');
+              }
               else reject(new Error('翻译响应异常'));
             } catch (e) { reject(new Error('翻译响应解析失败')); }
           } else reject(new Error('翻译 HTTP ' + r.status + ' ' + String(r.responseText || '').slice(0, 160)));
@@ -3420,6 +3526,7 @@
     if (!SETTINGS.aiKey) throw new Error('翻译需要配置 AI API Key（⚙ 设置 → 选厂商并填入 Key）');
     var targetName = LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo;
     var out = [], BATCH = 120;
+    aiTruncated = false;
     for (var i = 0; i < body.length; i += BATCH) {
       if (asrStop(myGen)) break;
       var batch = body.slice(i, i + BATCH);
@@ -3428,11 +3535,19 @@
       var resp = await aiChat(prompt);
       if (state.asr) { state.asr.done = Math.floor(i / BATCH) + 1; render(); }
       var arr = parseTranslations(resp, batch.length);
+      var got = 0;
       arr.forEach(function (x, k) {
         if (!x.content) return;
+        got++;
         out.push({ from: batch[k].from, to: batch[k].to, content: x.content });
       });
+      // 少给就是少给了，不能装作翻译完了。截断 / 条数不符都要当场说出来。
+      if (got < batch.length) {
+        toast('⚠ 第 ' + (Math.floor(i / BATCH) + 1) + ' 批只译回 ' + got + '/' + batch.length + ' 条'
+          + (aiTruncated ? '（被模型长度上限截断，可减少一次处理的条数或换上下文更长的模型）' : '（可重试本视频）'));
+      }
     }
+    if (aiTruncated) toast('⚠ 译文被模型长度限制截断，建议减少一次处理的条数或换上下文更长的模型');
     return out.length ? out : null;
   }
 
@@ -3610,6 +3725,7 @@
     var autoCopy = !!(opts && opts.autoCopy);   // v9.16：autoFetch 触发时，取到后自动复制到剪贴板
     var myGen = asrGen;   // v8.1.8 修复：补世代号守卫——切 P/切视频后旧流程的结果一律丢弃，不再写回 state
     state.loading = true; state.err = ''; state.noSub = false; state.asrRan = false;
+    state.ytBlocked = ''; state.subNeedLogin = false;
     state.asr = null; render();
     try {
       var ad = detectAdapter();
@@ -3618,6 +3734,13 @@
       state.subs = [];   // 必须先清：SPA 站内切视频时旧字幕列表会残留，导致「张冠李戴」
       await ad.resolve();
       if (asrStop(myGen)) return;   // 切 P/切视频：丢弃旧 resolve 结果
+
+      // YouTube 明说不放（登录墙 / 年龄 / 版权 / 私有）：把官方给的原因原文报出来。
+      // 必须卡在「引导用户去 AI 转写」之前——YouTube 的 getAudio 恒为 null，
+      // 根本没法转写，这时候推用户去烧额度纯属误导。
+      if (state.ytBlocked) {
+        state.err = state.ytBlocked; state.loading = false; render(); return;
+      }
 
       if (SETTINGS.asrForce) {
         toast('已开启「始终转写」，跳过自带字幕，直接音频转写');
@@ -3633,6 +3756,11 @@
         }
       }
       if (asrStop(myGen)) return;   // 切 P/切视频：旧字幕列表不落渲染
+      // 「字幕需登录才可见」≠「没有字幕」。别把它算成无字幕再推去 AI 转写白烧额度。
+      if (!state.subs.length && state.subNeedLogin) {
+        state.err = '该视频字幕需登录后可见，请先登录 B 站再重试（不是无字幕，不用 AI 转写）';
+        state.loading = false; render(); return;
+      }
       if (state.subs.length) {
         var lan = pickLanguage(state.subs);
         await fetchBody(lan);
@@ -3656,12 +3784,19 @@
       log(e);
       if (asrStop(myGen)) return;   // 切 P/切视频：旧流程的报错不打扰新视频
       state.asr = null;   // 翻译/转写中途失败也要复位，避免界面卡在「翻译中」
-      if (SETTINGS.asrFallback && !state.asrRan && !state.body) {
+      // 只给「软失败」兜底转写：结果为空、网络抖动、超时这类。
+      // HTTP 4xx 是接口明确拒绝（401 Key 错 / 403 风控 / 404 没这资源），
+      // 转写救不了它，还会把真实原因盖成一句「未配置 AI API Key」——那是谎报。
+      var msg = String((e && e.message) || e || '');
+      var hardFail = /HTTP\s+4\d\d/.test(msg) || state.ytBlocked;
+      // YouTube 的 getAudio 恒为 null，压根没有音频可转，回退只是白烧一次重试
+      var canAsr = state.adapter && state.adapter.id !== 'youtube';
+      if (SETTINGS.asrFallback && !state.asrRan && !state.body && !hardFail && canAsr) {
         state.err = '';
         await runAsr();
         return;
       }
-      state.err = '提取失败：' + e.message;
+      state.err = '提取失败：' + msg + (hardFail ? '（接口明确拒绝，未回退 AI 转写）' : '');
       state.loading = false; render();
     }
   }
@@ -3871,27 +4006,13 @@
       '.bsr-res-t{font-size:12px;font-weight:600;color:#222;line-height:1.5;display:flex;gap:6px;align-items:flex-start}' +
       '.bsr-res-t span{flex:1}' +
       '.bsr-res-m{font-size:10px;color:#999;margin-top:4px;line-height:1.6}' +
-      '.bsr-res-r{font-size:10px;color:#777;margin-top:5px;line-height:1.7;background:#fafafa;border-radius:6px;padding:5px 8px}' +
-      '.bsr-res-r li{margin-left:14px}' +
       '.bsr-sub{display:inline-block;font-size:10px;border-radius:4px;padding:0 4px}' +
       '.bsr-sub.yes{background:#e6f9f1;color:#0a8f5f}.bsr-sub.no{background:#fdeeee;color:#c05050}' +
       '.bsr-empty{font-size:11px;color:#aaa;text-align:center;padding:18px 0;line-height:1.7}' +
-      '.bsr-wbox{display:none;border:1px dashed #ddd;border-radius:8px;padding:8px;margin-top:8px}' +
-      '.bsr-wbox.show{display:block}' +
-      '.bsr-wbox textarea{width:100%;box-sizing:border-box;height:88px;font-size:10px;font-family:monospace;border:1px solid #eee;border-radius:6px;padding:6px}' +
       '.bsr-wtip{font-size:10px;color:#888;line-height:1.6;margin-bottom:6px}' +
       '.bsr-wrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:11px}' +
       '.bsr-wrow label{flex:none;width:120px;color:#555;cursor:pointer;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.bsr-wrow input[type=range]{flex:1;min-width:0;height:16px;accent-color:#7C5CBF;cursor:pointer}' +
-      '.bsr-wval{flex:none;width:36px;text-align:right;font-family:monospace;font-size:11px;color:#FB7299}' +
-      // v9.5 预设行：三档一键切换 + 当前档提示。按钮用胶囊样式，
-      // 选中态高亮（.on）；脱离预设后提示转「自定义」，不假装还锁在某档上。
-      '.bsr-wpresets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:6px 0}' +
-      '.bsr-wpresets button{flex:none;padding:3px 10px;font-size:11px;line-height:1.6;border:1px solid #e2e2e6;background:#fafafa;color:#555;border-radius:11px;cursor:pointer}' +
-      '.bsr-wpresets button:hover{border-color:#7C5CBF;color:#7C5CBF}' +
-      '.bsr-wpresets button.on{background:#7C5CBF;border-color:#7C5CBF;color:#fff}' +
-      '.bsr-wpreset-tip{font-size:10px;color:#999;margin-left:auto}' +
-      '.bsr-wpreset-tip.custom{color:#FB7299}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
       '.bsr-keywrap{position:relative}' +
       '.bsr-keywrap .eye{position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;color:#999;user-select:none}' +
@@ -3941,16 +4062,9 @@
       '#bsr-root[data-theme="dark"] .bsr-res:hover{border-color:#FB7299;background:#2a1f27}' +
       '#bsr-root[data-theme="dark"] .bsr-res-t{color:var(--bsr-fg)}' +
       '#bsr-root[data-theme="dark"] .bsr-res-m{color:var(--bsr-muted)}' +
-      '#bsr-root[data-theme="dark"] .bsr-res-r{background:var(--bsr-soft);color:#b0b0b8}' +
       '#bsr-root[data-theme="dark"] .bsr-empty{color:#8a8a92}' +
-      '#bsr-root[data-theme="dark"] .bsr-wbox{border-color:#4a4a55}' +
-      '#bsr-root[data-theme="dark"] .bsr-wbox textarea{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
       '#bsr-root[data-theme="dark"] .bsr-wtip{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-wrow label{color:#c5c5cc}' +
-      '#bsr-root[data-theme="dark"] .bsr-wval{color:#FF8FB1}' +
-      '#bsr-root[data-theme="dark"] .bsr-wpresets button{background:var(--bsr-soft);color:#c5c5cc;border-color:#3d3d47}' +
-      '#bsr-root[data-theme="dark"] .bsr-wpresets button:hover{border-color:#b9a3ff;color:#b9a3ff}' +
-      '#bsr-root[data-theme="dark"] .bsr-wpreset-tip{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-findinfo{color:#b9a3ff}' +
       '#bsr-root[data-theme="dark"] .bsr-pbox{border-color:#4a4a55}' +
       '#bsr-root[data-theme="dark"] .bsr-pbox input[type=number]{background:var(--bsr-input);color:var(--bsr-fg);border-color:var(--bsr-line)}' +
@@ -4418,15 +4532,31 @@
       if (asrNote) {
         var parts = ['由「' + p.label + '」驱动'];
         if (p.freeNote) parts.push(p.freeNote);
-        if (!p.supportsAudio) parts.push('（该厂商不支持语音转写，仅翻译可用）');
+        if (!p.supportsAudio) parts.push('（该厂商不提供语音转写端点，仅翻译可用）');
         asrNote.innerHTML = escHtml(parts.join(' · '));
       }
+    }
+    // 换厂商必须把模型名一起换掉：只刷 datalist 而留着旧 input 的 value，
+    // 切到 OpenAI 之后请求里带的还是「FunAudioLLM/SenseVoiceSmall」（抓包实证），
+    // 结果就是拿 A 家的模型名去打 B 家的接口，稳稳 404。用户仍可手填覆盖。
+    function applyProviderDefaults() {
+      var p = currentProvider();
+      var asr = root.querySelector('#bsrAsrModel');
+      if (asr && p.supportsAudio && p.asrModels && p.asrModels.length) {
+        asr.value = p.asrModels[0]; SETTINGS.asrModel = p.asrModels[0];
+      }
+      var t = root.querySelector('#bsrTModel');
+      if (t && p.chatModels && p.chatModels.length) {
+        t.value = p.chatModels[0]; SETTINGS.translateModel = p.chatModels[0];
+      }
+      saveSettings();   // 立刻落盘：换完厂商不点「保存」也别带着上家的模型名发请求
     }
     root.querySelector('#bsrAiProvider').onchange = function () {
       SETTINGS.aiProvider = root.querySelector('#bsrAiProvider').value;
       saveSettings();
       refreshProviderUI();
-      toast('已切换 AI 厂商：' + currentProvider().label);
+      applyProviderDefaults();
+      toast('已切换 AI 厂商：' + currentProvider().label + '（模型名已换成该厂商默认，可手填覆盖）');
     };
     // ---- v9.2 Tab 切换 ----
     function switchTab(name) {
@@ -4451,7 +4581,7 @@
     root.querySelector('#bsrAiTxt').onclick = exportAiText;
     root.querySelector('#bsrAnchor').onclick = exportAnchored;
     root.querySelector('#bsrCorrect').onclick = runLlmCorrect;
-    // 结果卡片：第一次点展开评分理由，第二次点打开视频（理由是为了「先看为什么再决定」）
+    // 结果卡片：点一下直接用本脚本打开该视频（v9.16 起不再有「先展开评分理由」这一层）
     root.querySelector('#bsrSearchResults').onclick = function (e) {
       var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
       if (!card) return;
@@ -4525,9 +4655,14 @@
     if (state.err) st.textContent = '⚠️ ' + state.err;
     else if (state.loading && state.asr) st.textContent = '⏳ ' + state.asr.phase + (state.asr.total ? '（' + state.asr.done + '/' + state.asr.total + '）' : '');
     else if (state.loading) st.textContent = '正在拉取字幕...';
-    else if (state.noSub) st.textContent = 'ℹ️ 本视频无字幕，点击下方「AI 转写」可语音生成字幕';
+    // 分站点说人话：YouTube 的 getAudio 恒为 null（音频是带签名的分片流），
+    // 根本走不了 AI 转写。以前不分站点一律喊「点下方 AI 转写」，点了必然失败。
+    else if (state.noSub) st.textContent = (state.adapter && state.adapter.id === 'youtube')
+      ? 'ℹ️ 该 YouTube 视频没有字幕轨道。YouTube 音频是带签名的分片流，本脚本取不到音频、无法 AI 转写——请换用带字幕（含官方自动字幕）的视频'
+      : 'ℹ️ 本视频无字幕，点击下方「AI 转写」可语音生成字幕';
     else if (state.body) {
-      var warn = state.body.incomplete ? ' ⚠️ 字幕可能不完整' : '';
+      var warn = state.body.incomplete ? ' ⚠️ 字幕可能不完整'
+        : (state.body.estTs ? ' ⚠️ 时间轴为估算（接口未返回时间戳）' : '');
       st.textContent = '✅ ' + state.body.length + ' 句 · ' + (state.lan || '') + ' · ' + bodyToTxt(state.body).replace(/\s/g, '').length + ' 字' + warn;
     } else st.textContent = '';
     var prog = $('#bsrProg');
@@ -4669,7 +4804,15 @@
         return '<option value="' + escHtml(s.lan) + '"' + (s.lan === state.lan ? ' selected' : '') + '>' + escHtml(s.lan_doc || s.lan) + ' (' + escHtml(s.lan) + ')' + (s.urls.length > 1 ? ' ×' + s.urls.length + '段' : '') + (s.ai ? ' AI' : '') + '</option>';
       }).join('');
     } else lanRow.style.display = 'none';
+    // 导出类按钮：没字幕时整排收起来。以前无条件显示，点下去什么也没发生，
+    // 看着就像脚本坏了。注意只藏「导出」，AI 转写 / 取消 / 解锁 属动作按钮，
+    // 恰恰是无字幕、转写中时要用到的，不能跟着一起藏。
     $('#bsrOps').style.display = 'flex';
+    var exportIds = ['#bsrCopy', '#bsrTxt', '#bsrSrt', '#bsrAiTxt', '#bsrAnchor', '#bsrVtt', '#bsrMd'];
+    for (var ei = 0; ei < exportIds.length; ei++) {
+      var eb = $(exportIds[ei]);
+      if (eb) eb.style.display = state.body ? '' : 'none';
+    }
     $('#bsrCancel').style.display = (state.asr && !state.err) ? 'inline-block' : 'none';
     // 无字幕时显示「AI 转写」按钮
     $('#bsrAsrBtn').style.display = (state.noSub || (!state.subs.length && !state.loading && !state.body)) ? 'inline-block' : 'none';
@@ -4678,7 +4821,7 @@
     // v9.2 LLM 纠错按钮：付费功能，仅在设置开启 + 有 Key + 有字幕时出现，不打扰默认用户
     $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.aiKey && state.body && !state.loading) ? 'inline-block' : 'none';
     // v9.2 搜索面板渲染。签名缓存：只有搜索状态真变了才重写列表，
-    // 否则用户点开「评分理由」时每帧 render 都会重建 DOM，展开状态当场丢失。
+    // 否则每帧 render 都会重建 DOM，刚渲染好的卡片被白刷一遍。
     var sst = $('#bsrSearchStatus');
     if (search.loading) sst.textContent = '⏳ 搜索中（B站需逐个探测字幕，稍候）...';
     else if (search.err) sst.textContent = '⚠️ ' + search.err;

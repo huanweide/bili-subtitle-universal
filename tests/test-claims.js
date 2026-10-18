@@ -143,7 +143,7 @@ claim('旧写死函数已重构为通用函数（sfTranscribe→aiTranscribe，s
   has('aiTranscribe') && has('aiChat') && !has('function sfTranscribe') && !has('function sfChat'));
 claim('每个厂商声明能力标记（是否支持语音转写 / 热词）',
   has('supportsAudio') && has('supportsHotwords'));
-claim('DeepSeek / OpenRouter 明确标记不支持语音转写（避免点了转写却 404）',
+claim('DeepSeek 明确标记没有语音转写端点（避免点了转写却 404）',
   has("audio: null, chat: '/chat/completions'"));
 claim('硅基流动预设端点正确（base + 音频/对话端点，拼接即真实可调用地址）',
   has("base: 'https://api.siliconflow.cn/v1'") && has("audio: '/audio/transcriptions'") && has("chat: '/chat/completions'"));
@@ -151,8 +151,12 @@ claim('OpenAI 预设端点正确（whisper 音频 + 对话，与官方一致）'
   has("base: 'https://api.openai.com/v1'") && has("audio: '/audio/transcriptions'") && has("chat: '/chat/completions'"));
 claim('DeepSeek 端点正确（base + 仅对话，audio 为 null）',
   has("base: 'https://api.deepseek.com/v1'") && has("audio: null, chat: '/chat/completions'"));
-claim('OpenRouter 端点正确（base + 仅对话，audio 为 null）',
-  has("base: 'https://openrouter.ai/api/v1'") && has("audio: null, chat: '/chat/completions'"));
+// 反向断言：OpenRouter 官方有 /audio/transcriptions（multipart ≤25MB），
+// 以前标成 audio:null + supportsAudio:false，等于把一条能用的路堵死还告诉用户「别点」。
+claim('OpenRouter 端点正确（base + 对话 + 语音转写端点）',
+  has("base: 'https://openrouter.ai/api/v1'") && has("audio: '/audio/transcriptions', chat: '/chat/completions'"));
+claim('OpenRouter 标记为支持语音转写（supportsAudio 随端点一起置真）',
+  has("audio: '/audio/transcriptions', chat: '/chat/completions',\n      supportsAudio: true"));
 claim('热词增强只在硅基流动启用，其它厂商不塞该参数（否则 4xx）',
   has('supportsHotwords') && has("\\(p\\.supportsHotwords\\) \\? currentHotwords\\(\\) : \\[\\]"));
 claim('自定义厂商允许填自己的 API 根地址与音频端点',

@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  fixture: YouTube 观看页「受限/需登录」形态（https://www.youtube.com/watch?v=aaaaaaaaaaa）
+  依据：真实受限视频（会员专属 / 年龄限制 / 付费 / 反爬登录校验）的 playerResponse 里
+  playabilityStatus.status 不是 OK（常见 UNPLAYABLE / LOGIN_REQUIRED / AGE_VERIFICATION_REQUIRED），
+  并且带 playabilityStatus.reason 文案，同时整个 captions 键通常不存在。
+  真实字段（有把握）：playabilityStatus.{status,reason}、videoDetails.{videoId,title}。
+  推测：messages[] / errorScreen 等键的具体形态随版本变化，与被测逻辑无关（被测代码不读它们）。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>受限视频 - YouTube</title></head>
+<body>
+<div id="player"></div>
+<div id="info"><h1 class="title">受限视频</h1></div>
+<script nonce="fixture-nonce">var ytInitialPlayerResponse = {"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you're not a bot.","messages":["Sign in to confirm you're not a bot."]},"videoDetails":{"videoId":"aaaaaaaaaaa","title":"受限视频","lengthSeconds":"600","author":"RestrictedChannel","isPrivate":false,"isLiveContent":false}};</script>
+</body>
+</html>

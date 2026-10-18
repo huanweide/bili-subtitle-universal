@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  fixture: YouTube timedtext 响应（fmt=ttml，lang=zh-Hans）
+  依据：YouTube /api/timedtext?...&fmt=ttml 的真实返回是 TTML1/DFXP：
+  根节点是 tt（命名空间 tt af1），head 里放 styling，body 下的 div 里逐条排字幕；
+  每条的属性就是 begin / end（也有少数用 dur），时间格式 HH:MM:SS.mmm。
+  推测：<style> 上的 tts:* 风格属性集合随版本变化，与被测解析无关。
+
+  注：本文件正文只有 6 条。注释里原本写了「字幕条目长什么样」的示例，结果被 parseTtml
+  连同注释一起读成了第 7 条（见 scripts/verify/report-youtube.md 的「附带发现 F1」），
+  所以示例已挪进单独的 yt-timedtext-comment.ttml。本注释刻意不再出现任何尖括号标签，
+  以免污染主用例的条数。
+-->
+<tt xmlns="http://www.w3.org/2006/10/ttaf1" xmlns:tts="http://www.w3.org/2006/10/ttaf1#style" xml:lang="zh-Hans">
+<head>
+<styling>
+<style id="defaultCaption" tts:color="#FFFFFF" tts:fontFamily="Verdana, Arial, Helvetica, sans-serif" tts:fontSize="16" tts:backgroundColor="#000000" />
+</styling>
+</head>
+<body>
+<div xml:lang="zh-Hans">
+<p begin="00:00:01.500" end="00:00:04.200" >大家好，欢迎回到我的频道</p>
+<p begin="00:00:04.200" end="00:00:07.800" >今天我们来聊聊 YouTube 字幕的抓取</p>
+<p begin="00:00:07.800" end="00:00:11.000" >这是第一条，用来验证时间轴</p>
+<p begin="00:00:11.000" end="00:00:14.600" >这是第二条，用来验证正文非空</p>
+<p begin="00:00:14.600" end="00:00:18.300" >这是第三条，中文标点也要正常</p>
+<p begin="00:00:18.300" end="00:00:21.900" >最后一句，验证合并与排序</p>
+</div>
+</body>
+</tt>

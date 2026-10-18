@@ -1,0 +1,14 @@
+<!doctype html>
+<!--
+  fixture: YouTube 嵌入播放器（https://www.youtube.com/embed/dQw4w9WgXcQ）
+  依据：embed 页同样是 classic script 挂 var ytInitialPlayerResponse，结构与 watch 页一致，
+  只是页面壳更薄。真实字段同 yt-watch.html；为聚焦「URL 形态认领」这一项，这里做了裁剪
+  （去掉 streamingData / microformat 等与字幕无关的键），保留 videoDetails 与 captions。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Rick Astley - Never Gonna Give You Up - YouTube</title></head>
+<body style="margin:0;background:#000">
+<div id="player"></div>
+<script nonce="fixture-nonce">var ytInitialPlayerResponse = {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"dQw4w9WgXcQ","title":"Rick Astley - Never Gonna Give You Up (Official Music Video)","lengthSeconds":"212","author":"RickAstleyVEVO","isLiveContent":false},"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&pot=FIXTURE_POT_TOKEN&xoaf=5&hl=zh-CN&ip=0.0.0.0&ipbits=0&expire=9999999999&sparams=ip%2Cipbits%2Cexpire%2Cv&signature=FIXTURE_SIGNATURE_ZH&key=yt8&lang=zh-Hans","name":{"simpleText":"Chinese (Simplified)"},"vssId":".zh-Hans","languageCode":"zh-Hans","isTranslatable":true,"trackName":"中文（简体）"}]}}};</script>
+</body>
+</html>

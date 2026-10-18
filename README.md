@@ -3,7 +3,7 @@
 > 一条油猴脚本，把任意网页视频变成可复制、可下载的文字。有官方字幕秒取，没字幕用 AI 听写，**3 小时长视频也能稳稳跑完**。零安装、零后端、零本地模型。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.16.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.17.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -47,7 +47,7 @@
 | **稿子能直接变总结** | v9.10：「🧠 AI 总结提示词」四套现成模板，点了复制「提示词 + 稿子」，粘进任意 AI 对话框就出总结 / 要点 / 笔记 / 思考题 |
 | **字幕对不上能整体挪** | v9.11：时间轴整体偏移（可正负，不产生负时间戳、不把条目压成 0 秒）；「只保留当前播放位置之后」一键收窄 |
 | **宣传的每一条都有证据** | v9.9 新增「全功能验证矩阵」67 条：三站取字幕、四层转写防线、断点续传、评分筛选、三层质量、全部导出格式、安全隐私承诺——README 承诺的每一条都必须在源码里指到一行证据。**写了却没实现，测试直接红** |
-| **有测试兜底** | 单元测试 86 项 + 评分/质量 32 项 + 接线验证 79 项 + 路由/导出 25 条 + 主题/可见性 21 条 + 站点认领 15 条 + 检索/导出 52 条 + 功能验证矩阵 88 条 + 往返一致性 15 条，合计 413 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
+| **有测试兜底** | 单元测试 86 项 + 评分/质量 32 项 + 接线验证 79 项 + 路由/导出 25 条 + 主题/可见性 21 条 + 站点认领 15 条 + 检索/导出 52 条 + 功能验证矩阵 89 条 + 往返一致性 15 条，合计 424 项断言，全部过了变异测试（把 bug 注回源码能被测试抓住）+ 文档一致性门禁 + 浏览器灰度页 + 播放录制状态机模拟器，改一行都跑一遍 |
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**。
 

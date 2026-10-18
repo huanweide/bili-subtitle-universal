@@ -1,0 +1,16 @@
+<!doctype html>
+<!--
+  fixture: youtu.be 短链（https://youtu.be/dQw4w9WgXcQ）——「重定向尚未发生」的那一瞬。
+
+  真实情况：youtu.be/<id> 服务端返回 303，Location 指向 https://www.youtube.com/watch?v=<id>。
+  也就是说脚本在 youtu.be 上运行时，页面上根本没有 ytInitialPlayerResponse，
+  下一秒就被导航走了。本 fixture 故意不写 meta refresh、不写 playerResponse，
+  用来观察「脚本在 youtu.be 这个 URL 上停住时」到底能做到哪一步。
+  （重定向完成后的表现另用 303 路由单独验证，见报告 case 6a。）
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>dQw4w9WgXcQ</title></head>
+<body>
+<p style="font:14px Arial">Redirecting you to YouTube…</p>
+</body>
+</html>

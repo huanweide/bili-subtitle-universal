@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  fixture: youtu.be 短链（https://youtu.be/dQw4w9WgXcQ）—— 客户端跳转版本。
+
+  真实 youtu.be 是服务端 303 跳 https://www.youtube.com/watch?v=<id>。
+  Playwright 的 route.fulfill 返回 303 时 Chromium 不会继续跟随（实测：请求停在
+  youtu.be 不再发第二个请求），所以这里改用等价的客户端跳转 location.replace()
+  —— 跨源 replace 会真的卸载当前文档并加载新文档，脚本因此在新文档里重新 boot，
+  与真实 303 的最终状态一致（旧的 303 用例已废弃，见报告 case 06a 备注）。
+-->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>dQw4w9WgXcQ</title></head>
+<body>
+<p style="font:14px Arial">Redirecting you to YouTube…</p>
+<script>location.replace('https://www.youtube.com/watch?v=dQw4w9WgXcQ');</script>
+</body>
+</html>

@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## 9.17.0 · 不再吞失败、不再谎报成功、不再把人往白烧额度上推
+
+**起因：一轮三 agent 并行的真机验证（Chromium 跑真实脚本 + 抓包 + 官方文档核对），暴露出一个共性病灶——脚本系统性吞掉真实错误，然后给用户一个看起来"没事"或"换条路就行"的假答案。用户被反复误导去烧 AI 转写额度。**
+
+> 验证方法与证据：`scripts/verify/` 下有完整报告（`report-browser.md` / `report-youtube.md` / `report-audit.md` / `report-fix.md`）与可复现脚本。真机验证用 Playwright + 本机 Chromium + GM API 打桩；模型部分另起 mock server 抓真实 HTTP 请求。
+
+### P0：谎报与误导（本版核心）
+
+- **SiliconFlow 返回的 JSON 被铺成"假时间戳字幕"**（最恶劣）：官方转写返回的是 `{"text":"..."}`，旧代码把它丢给 `parseSrt` 判空，再交给 `splitTextByTime`，在 0~时长内**均匀铺出一串假时间戳**——界面显示成功、有字，但每一句时间都是编的。新增 `extractAsrText` / `asrToSegments`：先走真时间戳解析，再剥 JSON 取文本；只能估算时置 `asrEstTs` 并在状态行与 toast **如实标注「时间轴为估算」**；认不出的响应**明确报错**，一段都不生成。顺带修掉两处同源缺陷：分片时间戳从第 2 片起整体翻倍后移、两半 JSON 字符串直接相加。
+- **YouTube 机器人校验被说成"无字幕"**：`playabilityStatus` 全文引用数为 0，官方把原因写在那里（如 `LOGIN_REQUIRED` / "Sign in to confirm you're not a bot."）却从没读过，用户看到的只有"本视频无字幕，点击下方 AI 转写"。现在读取 `status`/`reason`，直接显示 `YouTube 拒绝播放：<官方原因>`，且判断发生在 ASR 分支**之前**。同时：`getAudio()` 对 YouTube 恒返回 null（音频是带签名分片流），所以 YouTube 无字幕时**不再提示"点 AI 转写"**，改为说明改用官方自动字幕。
+- **HTTP 403 被 ASR 回退吞掉**：旧逻辑先清空 `state.err` 再跑 ASR，403 被替换成误导性的"未配置 AI API Key"。现在 `hardFail = /HTTP\s+4\d\d/`，4xx 直接报真实错误并注明"（接口明确拒绝，未回退 AI 转写）"，YouTube 干脆跳过回退。
+- **B站"需登录"被伪装成"无字幕"**：`need_login_subtitle` 全文引用数为 0。现在会提示"该视频字幕需登录后可见，请先登录 B 站再重试"，不再推用户去烧 ASR。
+
+### P1：正确性
+
+- **@description 宣传的 B站 WBI 签名从未生效过**：`getWbiKeys` 硬性要求 `code===0`，而未登录时 nav 返回 `-101` **但同时返回完整 `wbi_img`**，密钥被自己扔掉，整段 WBI 分支被 catch 吞掉、静默退回无签名请求（已用"改 code=0 后真实服务端返回 code:0"反证签名算法本身是对的）。改为以 `wbi_img`/`wbi_sub` 存在为准。
+- **`response_format:'srt'` 无条件发送**：OpenAI 官方明确 `gpt-4o-transcribe` / `mini` 只支持 json，OpenRouter 明确 `srt/vtt` 一律 400，SiliconFlow 契约里没这个参数。改为仅 `openai` + `whisper*` 才发。
+- **切换 AI 厂商不重置模型名**（抓包实证）：切到 OpenAI 后 multipart 里 model 仍是 `FunAudioLLM/SenseVoiceSmall`。`#bsrAiProvider.onchange` 现在会写入新厂商默认模型。
+- **OpenRouter 被错标为不支持语音转写**：实测官方有 26 个 STT 模型。补上转写端点、`supportsAudio:true` 与 STT 模型清单，UI 文案同步。
+- **单文件上限 40MB 超官方 25MB**：25~40MB 白白上传后 413。改为 25MB。
+- **翻译可能静默丢行**：`aiChat` 加 `max_tokens` 并检查 `finish_reason==='length'`，被截断时**明确提示**而非默默少给几行。
+- **自定义厂商 URL 拼接**：base 留空会拼出打到当前页面域名的相对路径；音频端点填完整 URL 会拼成 `base + '/' + 'https://...'`。新增 `aiUrl()` 兜住。
+- **热词降级误判**：正则里泛化的 `param|invalid` 会把"模型名无效"误判成热词不受支持，错误关闭用户的热词开关。已去掉。
+- **TTML 注释被当字幕**：`parseTtml` 用一条全局正则扫整份文档。改为先剥 `<!-- -->` 再把匹配限制在 `<body>` 内。
+- **陈旧 playerResponse 标题串台**：stale 守卫清了字幕轨却没清已写入的 title/up/duration，导出文件名会沿用上一条视频。一并清掉。
+
+### P2：清理
+
+- 删掉官方不存在的预设模型 `FunAudioLLM/SenseVoiceLarge`（下拉第二项选了必失败）。
+- OpenRouter 的 `claude-3.5-haiku` / `gemini-flash-1.5` 已下线，换成 `claude-haiku-4.5` / `gemini-2.5-flash`。DeepSeek 两个长期别名保留。
+- 无字幕时不再显示导出按钮（点了没反应像坏了）；`bsrAsrBtn` / `bsrCancel` / `bsrUnlock` 保留——无字幕时恰恰要用。
+- 删除 5 组已无 HTML 引用的死 CSS（`.bsr-wbox` 系列、`.bsr-res-r`）及暗色层对应覆盖。
+- 改掉两处"撒谎注释"（`:4454` / `:4681` 还在描述早已删除的"点开评分理由"交互）。
+
+### 测试
+
+- 10 个测试文件全绿；`node --check` 通过。
+- 新增专项验证 `scripts/verify/verify-fix.js`：**39/39**（从主脚本真实抠函数跑，不是抄一份实现）。
+- 同步更新 2 条"断言了旧错误行为"的测试：OpenRouter 的转写端点断言、暗色层覆盖对象改回仍在用的元素。
+
+### 已知未验证（诚实记录，不含糊）
+
+- 真机抓包复验厂商切换、真实受限 YouTube 页、真实 `need_login_subtitle` 返回、未登录 nav 实测、真实触发 `finish_reason=length`——均需真实 Key / 未登录 B 站环境，本机不具备。字段与行为按官方接口约定实现，实测若不同只涉及个别行的微调。
+
 ## 9.16.1 · 修「复制成功但预览区一条字幕都看不见」（P0 回归）
 
 **真事故：v9.16.0 把字幕预览从 `<textarea>` 换成可点击行列表时，`renderLines` 里把正文写成了 `item.text`——但全脚本 20+ 处字幕对象构造点用的统一字段是 `content`。结果每行渲染成空串：状态栏显示「✅ N 句」、复制也成功，预览区却只有时间戳、没有字。YouTube / 任意站点的预览同样全中。**

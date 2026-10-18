@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+  fixture: 带 XML 注释的 timedtext（用来复现 parseTtml 的「注释也当字幕读」行为）
+
+  真实 YouTube 返回里没有注释，所以这不是 YouTube 的现实场景；
+  但 TTML/DFXP 是通用格式，注释、<head> 里的元数据块在别的站点很常见。
+  本文件正文 6 条 <p>，注释里额外放了一个 <p> 示例，用来看解析器会不会把它也算进去。
+
+  示例：<p begin="00:00:00.000" end="00:00:00.000" >这是注释里的示例文本</p>
+-->
+<tt xmlns="http://www.w3.org/2006/10/ttaf1" xmlns:tts="http://www.w3.org/2006/10/ttaf1#style" xml:lang="zh-Hans">
+<head><styling><style id="defaultCaption" tts:fontSize="16" /></styling></head>
+<body><div xml:lang="zh-Hans">
+<p begin="00:00:01.500" end="00:00:04.200" >注释用例第一条</p>
+<p begin="00:00:04.200" end="00:00:07.800" >注释用例第二条</p>
+</div></body></tt>

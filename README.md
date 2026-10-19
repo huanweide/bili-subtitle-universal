@@ -10,6 +10,13 @@
 
 ---
 
+> **📦 便携性速览**
+>
+> - 纯油猴脚本：**零安装、零后端、零本地模型**，浏览器装 Tampermonkey 即用。
+> - 取官方字幕无需任何 Key；只有 AI 转写 / 翻译才需自备一家 OpenAI 兼容 Key（可切换，不绑死厂商）。
+> - 支持 Edge / Chrome / Firefox；设置与 Key 只存浏览器本地。
+
+
 ## 它解决什么问题
 
 三个真实场景，你对号入座：
@@ -455,3 +462,12 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js
 - **赞助**（自愿）：[GitHub Sponsors](https://github.com/sponsors/huanweide)
 
 > 如果这个工具帮到了你，**给个 Star ⭐** 能让更多人找到它。 © 2026 ReTri
+---
+
+## 🧰 更多开源工具（by ReTri · 樊斯瑞）
+
+- 🎬 字幕 / 视频：[bili-subtitle-universal](https://github.com/huanweide/bili-subtitle-universal) · [live-subtitle](https://github.com/huanweide/live-subtitle) · [zhihuishu-helper](https://github.com/huanweide/zhihuishu-helper) · [video-brief](https://github.com/huanweide/video-brief)
+- 🩺 代码健康全家桶（18 轴零依赖 CLI）：[family-showcase](https://github.com/huanweide/family-showcase)
+- 🔧 命令行利器：[idiot-index](https://github.com/huanweide/idiot-index) · [recall-cli](https://github.com/huanweide/recall-cli) · [forge-safeguard](https://github.com/huanweide/forge-safeguard-20260812)
+- 🖥️ 桌面 / 资讯：[floatsnip](https://github.com/huanweide/floatsnip) · [tech-news-hub](https://github.com/huanweide/tech-news-hub)
+- 📦 全部仓库：<https://github.com/huanweide?tab=repositories>

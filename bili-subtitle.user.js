@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.17.0
+// @version      9.17.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，有字幕优先、评分引擎默认权重排序、点卡片直接打开视频）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）；新增「进入视频自动获取字幕并复制」开关（默认关）、字幕区改为可点击行列表（点行跳到对应时间，命中行高亮）。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1506,8 +1506,10 @@
     aiKey: GM_getValue('bsr_ai_key', GM_getValue('bsr_sf_key', '')),
     aiBase: GM_getValue('bsr_ai_base', ''),
     aiAudioEp: GM_getValue('bsr_ai_audio_ep', ''),
-    asrEnable: GM_getValue('bsr_asr_enable', true),
-    asrFallback: GM_getValue('bsr_asr_fallback', true),
+    // 默认 OFF：无字幕 / 取字幕软失败时只提示，不偷偷烧 AI 转写额度。
+    // 需要转写请用户手动点「🎙 AI 转写」（该按钮直接走 runAsr，不受这两项影响）。
+    asrEnable: GM_getValue('bsr_asr_enable', false),   // 无字幕时自动 AI 语音转写
+    asrFallback: GM_getValue('bsr_asr_fallback', false), // 字幕获取失败时自动转写
     asrForce: GM_getValue('bsr_asr_force', false),
     asrLang: GM_getValue('bsr_asr_lang', 'auto'),
     asrChunkMin: GM_getValue('bsr_asr_chunk', 20),

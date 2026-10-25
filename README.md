@@ -27,6 +27,21 @@
 
 这个脚本把三件事合到一起：**取字幕、没字幕就听写、长视频也扛得住。**
 
+
+## 但有些场景，它帮不上
+
+说清楚边界，免得你装完才发现不对路：
+
+- **纯下载视频不是它的活**：它只提取 / 转写**字幕文字**，不下载视频文件、不转码。
+- **没字幕又没 Key，就只能干瞪眼**：取官方字幕免费且无需 Key；但 AI 听写 / 翻译必须自备一家 OpenAI 兼容 Key（硅基流动送 ¥16 代金券够用），没有就只能用官方字幕。
+- **取 AI 字幕通常要登录 B 站**：浏览器里已有 B 站登录态即可，脚本不替你登录。
+- **YouTube 无字幕音频转写受限**：YouTube 音频是带签名流媒体，脚本取不到原始音轨，会提示改用官方自动字幕（官方自动字幕本身已支持）。
+- **`MSE` / `blob:` 保护的视频取不到音**：浏览器媒体源扩展下页面没有可直接下载的音频地址。
+- **转写按调用计费**：AI 听写 / 翻译花的是你自己的额度，长视频走分段快路就是为了少烧钱；不想花就只用免费官方字幕。
+
+它不是「下载器」「破解器」或「自动搬运工具」——只是把**你有权观看的视频**变成可复制的文字，请用于个人学习与无障碍辅助。
+
+
 > **Topics（GitHub 仓库标签建议）**：`userscript` `tampermonkey` `bilibili` `youtube` `subtitle` `asr` `speech-to-text` `whisper` `sensevoice` `transcription` `javascript` `chinese`
 
 ---
@@ -464,10 +479,26 @@ SILICONFLOW_API_KEY=sk-... node tests/sf-smoke.js
 > 如果这个工具帮到了你，**给个 Star ⭐** 能让更多人找到它。 © 2026 ReTri
 ---
 
-## 🧰 更多开源工具（by ReTri · 樊斯瑞）
+## 🧰 同一作者的其他工具
 
-- 🎬 字幕 / 视频：[bili-subtitle-universal](https://github.com/huanweide/bili-subtitle-universal) · [live-subtitle](https://github.com/huanweide/live-subtitle) · [zhihuishu-helper](https://github.com/huanweide/zhihuishu-helper) · [video-brief](https://github.com/huanweide/video-brief)
-- 🩺 代码健康全家桶（18 轴零依赖 CLI）：[family-showcase](https://github.com/huanweide/family-showcase)
-- 🔧 命令行利器：[idiot-index](https://github.com/huanweide/idiot-index) · [recall-cli](https://github.com/huanweide/recall-cli) · [forge-safeguard](https://github.com/huanweide/forge-safeguard-20260812)
-- 🖥️ 桌面 / 资讯：[floatsnip](https://github.com/huanweide/floatsnip) · [tech-news-hub](https://github.com/huanweide/tech-news-hub)
-- 📦 全部仓库：<https://github.com/huanweide?tab=repositories>
+**顺手点个 Star ⭐，帮同类工具被更多人看见：**
+
+**字幕 / 视频全家桶**（解决「把视频变成文字」的不同环节）：
+- 🎬 **bili-subtitle-universal**（本仓库）· 全网视频字幕提取 + 无字幕 AI 听写
+- 🎓 [zhihuishu-helper](https://github.com/huanweide/zhihuishu-helper) · 智慧树网课自动播放 / 断点续播 / AI 答题（不瞎蒙）
+- 🔴 [live-subtitle](https://github.com/huanweide/live-subtitle) · 直播实时字幕
+- ✂️ [video-brief](https://github.com/huanweide/video-brief) · 视频内容速览
+
+**写小说 / 长文**：
+- ✍️ [novel-smith](https://github.com/huanweide/novel-smith) · AI 小说工匠（Next.js，本地优先，零云端依赖）
+
+**代码健康全家桶**（18 轴零依赖 CLI）：
+- 🩺 [family-showcase](https://github.com/huanweide/family-showcase) · 所有 doctor 工具的总览枢纽
+
+**命令行利器**：
+- 🔧 [idiot-index](https://github.com/huanweide/idiot-index) · [recall-cli](https://github.com/huanweide/recall-cli) · [forge-safeguard](https://github.com/huanweide/forge-safeguard-20260812)
+
+**桌面 / 资讯**：
+- 🖥️ [floatsnip](https://github.com/huanweide/floatsnip) · [tech-news-hub](https://github.com/huanweide/tech-news-hub)
+
+**全部仓库**：<https://github.com/huanweide?tab=repositories>

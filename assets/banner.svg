@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="bili-subtitle-universal">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16101c"/>
+      <stop offset="0.55" stop-color="#1d1230"/>
+      <stop offset="1" stop-color="#0b0812"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FB7299"/>
+      <stop offset="1" stop-color="#6ea8ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <g transform="translate(150,160)">
+    <rect x="-74" y="-60" width="148" height="124" rx="20" fill="none" stroke="url(#ring)" stroke-width="12"/>
+    <path d="M -16 -30 L 28 -6 L -16 18 Z" fill="url(#ring)"/>
+    <rect x="-46" y="32" width="92" height="9" rx="4.5" fill="#FB7299" opacity="0.85"/>
+    <rect x="-28" y="47" width="56" height="9" rx="4.5" fill="#6ea8ff" opacity="0.7"/>
+  </g>
+  <text x="296" y="152" fill="#eef1fa" font-family="Microsoft YaHei, Segoe UI, Helvetica, Arial, sans-serif" font-size="80" font-weight="800">全网视频字幕<tspan fill="#FB7299">全能提取</tspan></text>
+  <text x="300" y="206" fill="#c9c4d8" font-family="Microsoft YaHei, Segoe UI, Helvetica, Arial, sans-serif" font-size="27">有字幕秒取 · 无字幕 AI 听写 · 3 小时长视频也稳</text>
+  <g font-family="Microsoft YaHei, Segoe UI, Helvetica, Arial, sans-serif" font-size="21" fill="#f3b8cd">
+    <rect x="304" y="234" width="238" height="44" rx="22" fill="#FB72991a" stroke="#7a3d55"/>
+    <text x="322" y="262">B站 / YouTube / 任意网页</text>
+    <rect x="562" y="234" width="222" height="44" rx="22" fill="#FB72991a" stroke="#7a3d55"/>
+    <text x="580" y="262">零后端 · 零本地模型</text>
+    <rect x="804" y="234" width="230" height="44" rx="22" fill="#FB72991a" stroke="#7a3d55"/>
+    <text x="822" y="262">断点续传 · 不重复烧钱</text>
+  </g>
+</svg>

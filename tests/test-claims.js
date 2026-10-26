@@ -156,7 +156,7 @@ claim('DeepSeek 端点正确（base + 仅对话，audio 为 null）',
 claim('OpenRouter 端点正确（base + 对话 + 语音转写端点）',
   has("base: 'https://openrouter.ai/api/v1'") && has("audio: '/audio/transcriptions', chat: '/chat/completions'"));
 claim('OpenRouter 标记为支持语音转写（supportsAudio 随端点一起置真）',
-  has("audio: '/audio/transcriptions', chat: '/chat/completions',\n      supportsAudio: true"));
+  has("audio: '/audio/transcriptions', chat: '/chat/completions',\\s+supportsAudio: true"));
 claim('热词增强只在硅基流动启用，其它厂商不塞该参数（否则 4xx）',
   has('supportsHotwords') && has("\\(p\\.supportsHotwords\\) \\? currentHotwords\\(\\) : \\[\\]"));
 claim('自定义厂商允许填自己的 API 根地址与音频端点',

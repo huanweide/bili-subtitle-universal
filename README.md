@@ -13,7 +13,6 @@
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
 
-**EN:** [README_EN.md](README_EN.md) · A Tampermonkey userscript that turns any web video into copyable text — grabs official subtitles instantly, or transcribes with AI when none exist.
 
 **自动流程**：`打开视频页 → 🎬 点开面板 → ⚡ 获取字幕 →（无字幕时）🎙 AI 转写 → 📋 复制 / ⬇ SRT·VTT·MD`
 

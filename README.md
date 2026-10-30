@@ -20,6 +20,11 @@
 
 ---
 
+## 谁该用 / 谁先别用
+
+- **该用**：想给 B 站 / YouTube / 任意网页视频「随手点一下」就拿到字幕的人；视频没字幕也想靠 AI 听写救场的人；不想装客户端、不想配后端的人。
+- **先别用**：想要「一条命令批量抓一堆、能写进脚本 / 定时任务 / CI」的人——那是 [bili-subtitle-extractor](https://github.com/huanweide/bili-subtitle-extractor)（Python CLI）的活；需要离线纯命令行、不依赖浏览器的场景也更适合 Python 版。
+
 ## 30 秒看懂
 
 ```text

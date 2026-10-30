@@ -16,11 +16,11 @@
 
 **自动流程**：`打开视频页 → 🎬 点开面板 → ⚡ 获取字幕 →（无字幕时）🎙 AI 转写 → 📋 复制 / ⬇ SRT·VTT·MD`
 
-[30 秒看懂](#-30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
+[30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
 
 ---
 
-## 🎯 30 秒看懂
+## 30 秒看懂
 
 ```text
 之前 · 一个 3 小时无字幕的讲座视频
@@ -343,7 +343,7 @@ MIT — 详见 [LICENSE](LICENSE)。B 站、YouTube 等名称为其各自所有�
 
 如果这个脚本帮你省下了一次手打字幕的时间，**点个 Star 就是最好的回报**——它也是更多人找到这个项目的唯一方式。
 
-**作者**：ReTri（[@huanweide](https://github.com/huanweide)）· MIT · © 2026
+**作者**：huanweide（[@huanweide](https://github.com/huanweide)）· MIT · © 2026
 
 **同一作者的其他工具**（顺手点个 Star ⭐）：
 

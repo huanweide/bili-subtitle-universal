@@ -2,6 +2,8 @@
   <img src="assets/banner.svg" alt="bili-subtitle-universal — 全网视频字幕全能提取">
 </p>
 
+**English** · [README_EN.md](./README_EN.md)
+
 # 🎬 全网视频字幕提取 · AI 转写版
 
 > **不是「又一个 B 站字幕脚本」——是「没字幕也能出字」的那一个。**
@@ -19,11 +21,6 @@
 [30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
 
 ---
-
-## 谁该用 / 谁先别用
-
-- **该用**：想给 B 站 / YouTube / 任意网页视频「随手点一下」就拿到字幕的人；视频没字幕也想靠 AI 听写救场的人；不想装客户端、不想配后端的人。
-- **先别用**：想要「一条命令批量抓一堆、能写进脚本 / 定时任务 / CI」的人——那是 [bili-subtitle-extractor](https://github.com/huanweide/bili-subtitle-extractor)（Python CLI）的活；需要离线纯命令行、不依赖浏览器的场景也更适合 Python 版。
 
 ## 30 秒看懂
 

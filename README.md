@@ -3,6 +3,7 @@
 </p>
 
 **English** · [README_EN.md](./README_EN.md)
+ ![Uploading {C83B8653-078C-4ED6-9179-80649D8369DF}.png…]()
 
 # 🎬 全网视频字幕提取 · AI 转写版
 

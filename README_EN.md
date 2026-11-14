@@ -17,7 +17,7 @@
 
 **Automated flow**: `open video page → 🎬 open panel → ⚡ get subtitles → (no subtitles) 🎙 AI transcription → 📋 copy / ⬇ SRT·VTT·MD`
 
-[30-second overview](#30-second-overview) · [What it does](#what-it-does) · [Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Boundaries](#security-boundary) · [Roadmap](#roadmap) · [Contributing](#contributing)
+[Screenshot](#screenshot) · [30-second overview](#30-second-overview) · [What it does](#what-it-does) · [Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Boundaries](#security-boundary) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
 ---
 
@@ -50,6 +50,16 @@ $ export
 ```
 
 **The one-line difference**: other tools stop at "grab official subtitles"; this script turns the "no subtitles" dead end into a live path.
+
+---
+
+## Screenshot
+
+Real UI, not a mockup: **fetch subtitles → pick a language track → search phrases → copy / TXT / SRT / VTT / MD / AI text / anchored draft / AI proofread** — all in one panel.
+
+<p align="center">
+  <img src="assets/screenshot-panel.png" alt="Subtitle panel with fetch, language selector, phrase search and six export formats" width="380">
+</p>
 
 ---
 

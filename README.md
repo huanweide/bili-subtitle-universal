@@ -3,12 +3,12 @@
 </p>
 
 **English** · [README_EN.md](./README_EN.md)
- ![Uploading {C83B8653-078C-4ED6-9179-80649D8369DF}.png…]()
 
 # 🎬 全网视频字幕提取 · AI 转写版
 
 > **不是「又一个 B 站字幕脚本」——是「没字幕也能出字」的那一个。**
-> 有官方字幕就秒取，没有就用 AI 听写，**3 小时长视频也能稳稳跑完**。
+> 有官方字幕就秒取（免 Key、不花钱），没有就用 AI 听写，**3 小时长视频也能稳稳跑完**。
+> ⭐ 如果它帮你省下了一整晚，右上角点个 Star 就是最好的反馈。
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
 [![version](https://img.shields.io/badge/version-9.17.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
@@ -19,7 +19,7 @@
 
 **自动流程**：`打开视频页 → 🎬 点开面板 → ⚡ 获取字幕 →（无字幕时）🎙 AI 转写 → 📋 复制 / ⬇ SRT·VTT·MD`
 
-[30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
+[界面预览](#界面预览) · [30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
 
 ---
 
@@ -52,6 +52,16 @@ $ 导出
 ```
 
 **一句话差别**：别的工具止步于「取官方字幕」，本脚本把「没有字幕」这条死路接成了活路。
+
+---
+
+## 界面预览
+
+真机实拍，不是概念图：**获取字幕 → 选语言轨道 → 找词 → 复制 / TXT / SRT / VTT / MD / AI 文本 / 锚点稿 / AI 纠错**，一个面板全做完。
+
+<p align="center">
+  <img src="assets/screenshot-panel.png" alt="字幕提取面板：获取字幕、语言选择、找词、复制与六种导出" width="380">
+</p>
 
 ---
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.18.0
+// @version      9.19.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；v9.18 新增「解析结果留存」：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索框改为 BV 号/链接直取，识别后一键打开并自动解析；设置面板按步骤分组并标注各厂商是否支持转写。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -4120,7 +4120,7 @@
       '.bsr-mini{position:fixed;right:16px;bottom:120px;background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;border-radius:22px;padding:9px 16px;font-size:12px;font-weight:700;box-shadow:0 4px 16px rgba(251,114,153,.45);cursor:pointer;z-index:999999;display:none;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}' +
       '.bsr-mini:hover{transform:scale(1.04)}' +
       '.bsr-ops{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}' +
-      '.bsr-ops .bsr-btn{flex:1;min-width:70px}' +
+      '.bsr-ops .bsr-btn{flex:1 1 calc(25% - 6px);min-width:0}' +
       '.bsr-prompts{display:flex;gap:6px;flex-wrap:wrap}' +
       '.bsr-pbox input[type=number]{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid #eee;border-radius:8px;font-size:12px;font-family:inherit}' +
       '.bsr-prompts button{flex:none;padding:5px 10px;font-size:11px;line-height:1.6;border:1px solid #e2e2e6;background:#fafafa;color:#555;border-radius:11px;cursor:pointer;font-family:inherit}' +
@@ -4249,6 +4249,20 @@
       '.bsr-btn:hover{filter:brightness(1.09)}' +
       '.bsr-btn:active{transform:translateY(1px)}' +
       '.bsr-btn:disabled{opacity:.55;cursor:default}' +
+      // v9.19 导出区降噪：原先 8 个高饱和彩色按钮排成一片，像调色板，主操作反而看不见。
+      // 现在只留「复制」用品牌粉，其余统一浅底细边，视线先落在唯一的主操作上。
+      '.bsr-ops .bsr-c,.bsr-ops .bsr-t,.bsr-ops .bsr-s{background:#f5f5f9;color:#3f3f49;border:1px solid #e8e8f0;font-weight:600;white-space:nowrap;padding:8px 10px}' +
+      '.bsr-ops .bsr-c:hover,.bsr-ops .bsr-t:hover,.bsr-ops .bsr-s:hover{background:#ececf5;border-color:#d9d9e6;filter:none}' +
+      // 「AI 转写」和「取消」在操作区里是语义按钮，不能跟着导出按钮一起灰掉
+      '.bsr-ops .bsr-asr{background:linear-gradient(135deg,#ff9f43,#ff8f00);color:#fff;border:none;font-weight:700;white-space:nowrap}' +
+      '.bsr-ops .bsr-cancel{background:#fdecec;color:#c93b3b;border:1px solid #f6d5d5;font-weight:600;white-space:nowrap}' +
+      '.bsr-ops .bsr-cancel:hover{background:#fbe0e0;border-color:#f0c2c2;filter:none}' +
+      '#bsr-root #bsrCopy{background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(251,114,153,.30)}' +
+      '#bsr-root #bsrCopy:hover{filter:brightness(1.06)}' +
+      '#bsr-root[data-theme="dark"] .bsr-ops .bsr-c,#bsr-root[data-theme="dark"] .bsr-ops .bsr-t,#bsr-root[data-theme="dark"] .bsr-ops .bsr-s{background:#26262d;color:#cfcfd8;border-color:#35353f}' +
+      '#bsr-root[data-theme="dark"] .bsr-ops .bsr-c:hover,#bsr-root[data-theme="dark"] .bsr-ops .bsr-t:hover,#bsr-root[data-theme="dark"] .bsr-ops .bsr-s:hover{background:#2e2e37;border-color:#45454f}' +
+      '#bsr-root[data-theme="dark"] .bsr-ops .bsr-cancel{background:#3a2224;color:#ff9a9a;border-color:#4a2b2e}' +
+      '#bsr-root[data-theme="dark"] #bsrCopy{background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;border-color:transparent}' +
       '#bsr-root button:focus-visible,#bsr-root select:focus-visible,#bsr-root input:focus-visible,#bsr-root textarea:focus-visible{outline:2px solid #7C5CBF;outline-offset:1px}' +
       '.bsr-h .th{cursor:pointer;opacity:.9;font-size:13px;user-select:none}' +
       '.bsr-h .th:hover{opacity:1;transform:scale(1.12)}' +
@@ -5037,7 +5051,7 @@
         var d = search.direct;
         var here = (state.bvid === d.bvid);
         sbox.innerHTML = '<div class="bsr-res" id="bsrDirectCard" title="' + (here ? '点击立即解析' : '点击打开该视频并自动解析') + '">' +
-          '<div class="bsr-res-t"><span>BV ' + escHtml(d.bvid) + '</span></div>' +
+          '<div class="bsr-res-t"><span>' + escHtml(d.bvid) + '</span></div>' +
           '<div class="bsr-res-m">' + (here ? '当前就是该视频 · 点击立即解析' : '点击打开该视频 · 自动开始解析字幕') + '</div>' +
           '</div>';
       } else if (!search.items.length && !search.loading) {

@@ -1,20 +1,22 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="bili-subtitle-universal — 全网视频字幕全能提取">
+  <img src="assets/hero.jpg" alt="B 站视频页右侧的字幕面板：一键获取官方字幕，逐行可点跳转，可复制或导出 SRT / VTT / MD" width="960">
 </p>
 
-**English** · [README_EN.md](./README_EN.md)
+<h1 align="center">全网视频字幕提取 · AI 转写版</h1>
 
-# 🎬 全网视频字幕提取 · AI 转写版
+<p align="center">
+  有字幕秒取，没字幕 AI 听写。<br/>
+  一个浏览器面板，把「这个视频没字幕」变成「稿子已经在剪贴板里」。
+</p>
 
-> **不是「又一个 B 站字幕脚本」——是「没字幕也能出字」的那一个。**
-> 有官方字幕就秒取（免 Key、不花钱），没有就用 AI 听写，**3 小时长视频也能稳稳跑完**。
-> ⭐ 如果它帮你省下了一整晚，右上角点个 Star 就是最好的反馈。
-
-> 🗂 **v9.18**：解析跑着的时候切走视频也不会中断，跑完自动留存最近 5 条结果，可逐条查看、单条复制。
-> 搜索框直接贴 BV 号或链接，一键打开并自动解析。
+<p align="center">
+  <a href="./README_EN.md">English</a> ·
+  <a href="https://github.com/huanweide/bili-subtitle-universal/issues">反馈</a> ·
+  <a href="#快速开始--quick-start">安装</a>
+</p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.18.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.19.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -22,7 +24,64 @@
 
 **自动流程**：`打开视频页 → 🎬 点开面板 → ⚡ 获取字幕 →（无字幕时）🎙 AI 转写 → 📋 复制 / ⬇ SRT·VTT·MD`
 
-[界面预览](#界面预览) · [30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
+[三种用法](#三种用法) · [跑着也能走开](#跑着也能走开) · [30 秒看懂](#30-秒看懂) · [特性](#特性--features) · [快速开始](#快速开始--quick-start) · [架构](#架构--architecture) · [边界](#安全边界) · [路线图](#路线图--roadmap) · [贡献](#贡献-contributing)
+
+---
+
+## 三种用法
+
+同一块面板，覆盖「有字幕」「没字幕」「跑着走开」三种真实情况。下图为面板实际渲染，视频与字幕为演示样本。
+
+<p align="center">
+  <img src="assets/shot-subtitles.png" width="31%" alt="官方字幕面板：语言轨道、逐行时间轴、复制与六种导出">
+  <img src="assets/shot-asr.png" width="31%" alt="AI 转写面板：五步进度条、音频体积与预计剩余时间、实时字幕流">
+  <img src="assets/shot-history.png" width="31%" alt="历史结果面板：最近 5 条解析结果，点开查看、右侧一键复制">
+</p>
+
+**① 有官方字幕** — WBI 签名调官方接口，人工字幕优先于 AI 字幕，中文优先。取回即可逐行点跳、检索、整体校正时间轴。
+
+**② 没字幕** — 分段解码后送 ASR，边转边显示；进度、已处理时长、预计剩余都是实打实算出来的。
+
+**③ 跑着走开** — 切到别的视频，任务转入后台继续；结束后自动归档，最多留 5 条，随时回来逐条复制。
+
+<p align="center">
+  <img src="assets/shot-dark.png" width="300" alt="深色模式下的字幕面板">
+  <img src="assets/shot-search.png" width="300" alt="粘贴 BV 号后生成的直取卡片">
+</p>
+
+<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ 搜索页：贴 BV 号或链接，直接生成「打开并自动解析」卡片</sub></p>
+
+---
+
+## 跑着也能走开
+
+<p align="center">
+  <img src="assets/demo-history.gif" width="420" alt="动图：解析完成后展开历史结果，点条目查看，右侧按钮单条复制">
+</p>
+
+以前换个视频，正在跑的转写会自己断掉，白花一次钱；现在它只是在后台继续，跑完自己进「🗂 历史结果」。
+**唯一会中断的方式，是你手动点「✖ 取消」。**
+
+---
+
+## 30 秒看懂
+
+| | 一个 3 小时、没有字幕的讲座视频 |
+|---|---|
+| **你手打** | 边看边暂停，一整晚 |
+| **别的脚本** | 弹一句「本视频无字幕」，然后没有下文 |
+| **本脚本** | 分段解码 → 逐段送 ASR → 断点续传 → 你得到一份完整稿子 |
+
+真实跑起来时，面板上是这些数字（不是装饰）：
+
+```text
+音频 86MB · 时长 3:33:00 · 已处理 1:21:00 / 3:33:00 · 已用 2:14 · 预计还需 4:06
+转写中 · 41/107 片 · 总进度 38%
+[1:20:52] 因为半充满的稳定性把能量拉低了
+[1:21:04] 所以你不能只看主量子数
+```
+
+**一句话差别**：别的工具止步于「取官方字幕」，本脚本把「没有字幕」这条死路接成了活路。
 
 ---
 
@@ -30,51 +89,11 @@
 
 | 你是 | 从这里开始 |
 |---|---|
-| **只想把字幕拿出来**，不写代码 | [快速开始](#快速开始-quick-start)：装 Tampermonkey → 装脚本 → 点 ⚡ |
+| **只想把字幕拿出来**，不写代码 | [快速开始](#快速开始--quick-start)：装 Tampermonkey → 装脚本 → 点 ⚡ |
 | **视频没字幕**，要 AI 听写 | 同上，再到 ⚙ 设置填一个 API Key（有免费额度的厂商已标注） |
 | **要批量取**，边跑边切别的视频 | 打开「🗂 历史结果」，最近 5 条自动留存，逐条复制 |
 | **想接自己的站点或厂商** | [加一个你自己的站点](#加一个你自己的站点--厂商) |
 | **想跑测试 / 提 PR** | [贡献](#贡献-contributing)，一条命令：`node tests/run-tests.js` |
-
-## 30 秒看懂
-
-```text
-之前 · 一个 3 小时无字幕的讲座视频
-─────────────────────────────────────────────
-  你      边看边暂停，手打字幕            →  一整晚
-  别的脚本  「本视频无字幕」然后没下文       →  死路
-  本脚本    🎙 AI 转写 → 分段解码 → 断点续传 →  3 小时后你有一份完整稿子
-
-之后 · 终端里真正发生的事
-─────────────────────────────────────────────
-$ 打开 https://www.bilibili.com/video/BV…
-  右下角出现「🎬 字幕」胶囊
-
-$ 点「⚡ 获取字幕」
-  ✔ 命中官方字幕（中文·人工）· 1,284 条      ← 无 Key、不花钱、秒出
-
-$ 若是无字幕视频 → 点「🎙 AI 转写」
-  ① 下载  ② 读时长  ③ 分段解码  ④ 转写  ⑤ 合并
-  音频 86MB · 时长 3:33:00 · 已处理 1:12:30 / 3:33:00 · 已用 2:14 · 预计还需 4:06
-  [00:00:03] 你好，欢迎来到本期节目
-  [00:00:08] 上一节我们讲到了电子排布
-  [00:00:15] 现在来看第二主族
-
-$ 导出
-  📋 复制 · ⬇ TXT（带 BOM） · ⬇ SRT · ⬇ VTT · ⬇ MD · 🤖 AI 文本 · ⚓ 锚点稿
-```
-
-**一句话差别**：别的工具止步于「取官方字幕」，本脚本把「没有字幕」这条死路接成了活路。
-
----
-
-## 界面预览
-
-真机实拍，不是概念图：**获取字幕 → 选语言轨道 → 找词 → 复制 / TXT / SRT / VTT / MD / AI 文本 / 锚点稿 / AI 纠错**，一个面板全做完。
-
-<p align="center">
-  <img src="assets/screenshot-panel.png" alt="字幕提取面板：获取字幕、语言选择、找词、复制与六种导出" width="380">
-</p>
 
 ---
 
@@ -154,7 +173,7 @@ https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@main/bili-subtitle
 
 ### 第 4 步 · 可选：配 AI Key（只有转写 / 翻译才需要）
 
-去任意一家开 OpenAI 兼容接口的厂商拿 Key（默认 [硅基流动](https://cloud.siliconflow.cn/i/axOmWfWi)，GitHub 注册送 ¥16 代金券），
+去任意一家提供 OpenAI 兼容接口的厂商拿 Key（默认 [硅基流动](https://cloud.siliconflow.cn/i/axOmWfWi)，新用户有赠送额度，够跑完一批转写），
 进面板 ⚙ 设置 → 选「AI 厂商」→ 粘贴 `sk-` 开头的 Key → 点「测试连接」先验有效性（不烧额度）→ 点 **🎙 AI 转写**。
 
 ```text
@@ -177,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.17.1 · 用例 86）
+结果：全部一致（版本 9.19.0 · 用例 86）
 ```
 
 ---
@@ -340,7 +359,8 @@ myvendor: {
 - ✅ v9.0 分段解码 · v9.4 分段断点续传 · v9.6 锚点不误伤 · v9.7 深色模式
 - ✅ v9.8 认领表 · v9.9 字幕内检索 + VTT/MD · v9.10 点击跳转 + AI 总结提示词
 - ✅ v9.11 时间轴校正 · v9.12 往返一致性 · v9.14 AI 厂商可切换 · v9.17 默认关闭自动转写
-- ⬜ **v9.13（下一步）**：真实站点字幕语料回归集（fixtures）
+- ✅ v9.18 结果留存 + BV 直取 · v9.19 导出区降噪（一个主操作）
+- ⬜ **下一步**：真实站点字幕语料回归集（fixtures）
 - ⬜ YouTube 音频解流签名（解开后无字幕也能转写）
 - ⬜ 更多站点：西瓜 / 腾讯视频 / 微博视频 / Vimeo
 - ⬜ ASS / LRC 导出、双语对照导出

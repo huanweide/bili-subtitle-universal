@@ -1,25 +1,25 @@
 **中文** · [README.md](./README.md)
 
 <p align="center">
-  <img src="assets/banner.svg" alt="bili-subtitle-universal — universal video subtitle extraction">
+  <img src="assets/hero.jpg" alt="Subtitle panel on a Bilibili video page: fetch official subtitles in one click, click a line to jump, copy or export SRT / VTT / MD" width="960">
 </p>
 
-# 🎬 Universal video subtitle extraction · AI transcription edition
+<h1 align="center">Universal Video Subtitle Extraction · AI Transcription</h1>
 
-> **Not "yet another Bilibili subtitle script" — it's the one that still produces text when there are no subtitles.**
-> Grabs official subtitles instantly when present; when absent, transcribes with AI — **a 3-hour video still runs to completion reliably**.
-
-> 🗂 **v9.18**: switching videos no longer interrupts a running transcription. Finished results are archived (last 5) for later viewing and one-click copy. Paste a BV id or URL to open and transcribe in one step.
+<p align="center">
+  Official subtitles in one click. AI transcription when there are none.<br/>
+  One browser panel that turns "this video has no subtitles" into "the transcript is already in your clipboard".
+</p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.18.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.19.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
 
 **Automated flow**: `open video page → 🎬 open panel → ⚡ get subtitles → (no subtitles) 🎙 AI transcription → 📋 copy / ⬇ SRT·VTT·MD`
 
-[Screenshot](#screenshot) · [30-second overview](#30-second-overview) · [What it does](#what-it-does) · [Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Boundaries](#security-boundary) · [Roadmap](#roadmap) · [Contributing](#contributing)
+[Three modes](#three-modes) · [Walk away while it runs](#walk-away-while-it-runs) · [Features](#features) · [Quick start](#quick-start) · [Architecture](#architecture) · [Boundaries](#security-boundary) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
 ---
 
@@ -55,13 +55,38 @@ $ export
 
 ---
 
-## Screenshot
+## Three modes
 
-Real UI, not a mockup: **fetch subtitles → pick a language track → search phrases → copy / TXT / SRT / VTT / MD / AI text / anchored draft / AI proofread** — all in one panel.
+One panel, covering the three situations you actually run into.
 
 <p align="center">
-  <img src="assets/screenshot-panel.png" alt="Subtitle panel with fetch, language selector, phrase search and six export formats" width="380">
+  <img src="assets/shot-subtitles.png" width="31%" alt="Official subtitles: language tracks, per-line timeline, copy and six export formats">
+  <img src="assets/shot-asr.png" width="31%" alt="AI transcription: five-step progress, audio size and ETA, live transcript stream">
+  <img src="assets/shot-history.png" width="31%" alt="History panel: last 5 results, open to view, copy each one on the right">
 </p>
+
+**① Official subtitles exist** — WBI-signed official API, human subtitles before AI ones, Chinese first. Once loaded you can click any line to jump, search inside, and shift the whole timeline.
+
+**② No subtitles** — segmented decoding feeds the ASR, streaming text as it goes; progress, processed duration and ETA are all computed from real numbers.
+
+**③ Walk away** — switch to another video and the job keeps running in the background; when it finishes it archives automatically (last 5), ready for one-click copy.
+
+<p align="center">
+  <img src="assets/shot-dark.png" width="300" alt="Subtitle panel in dark mode">
+  <img src="assets/shot-search.png" width="300" alt="Direct card generated after pasting a BV id">
+</p>
+
+<p align="center"><sub>Dark mode · follows the system, or switch manually ｜ Search tab: paste a BV id or URL to get an "open and transcribe" card</sub></p>
+
+---
+
+## Walk away while it runs
+
+<p align="center">
+  <img src="assets/demo-history.gif" width="420" alt="Animation: after a job finishes, open history, view an entry, copy it from the right">
+</p>
+
+Switching videos used to kill a running transcription and waste the money already spent. Now the job just continues in the background and files itself under **🗂 History** when done. **The only way to stop it is the ✖ Cancel button.**
 
 ---
 

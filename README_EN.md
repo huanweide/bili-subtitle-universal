@@ -9,8 +9,10 @@
 > **Not "yet another Bilibili subtitle script" — it's the one that still produces text when there are no subtitles.**
 > Grabs official subtitles instantly when present; when absent, transcribes with AI — **a 3-hour video still runs to completion reliably**.
 
+> 🗂 **v9.18**: switching videos no longer interrupts a running transcription. Finished results are archived (last 5) for later viewing and one-click copy. Paste a BV id or URL to open and transcribe in one step.
+
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.17.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.18.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)

@@ -164,7 +164,7 @@ test('escHtml 挡住属性注入（轨道名来自站点接口，不是写死的
 });
 test('【源码断言】字幕轨道下拉用 escHtml 包裹 lan / lan_doc', () => {
   const srcTxt = fs.readFileSync(path.join(__dirname, '..', 'bili-subtitle.user.js'), 'utf8');
-  const opt = srcTxt.match(/sel\.innerHTML = state\.subs\.map[\s\S]*?join\(''\);/);
+  const opt = srcTxt.match(/sel\.innerHTML = (?:state|VS)\.subs\.map[\s\S]*?join\(''\);/);
   assert.ok(opt, '未找到下拉渲染代码');
   const tpl = opt[0];
   assert.ok(/value="'\s*\+\s*escHtml\(s\.lan\)/.test(tpl), 'option 的 value 属性必须过 escHtml');
@@ -343,7 +343,7 @@ test('probeAudioMeta 只读元数据且静音（不会出声）', () => {
 test('runAsr 下载后探测真实时长再选路', () => {
   const fn = extractFunc('runAsr');
   assert.ok(/await probeAudioMeta\(blob\)/.test(fn), 'runAsr 应调用 probeAudioMeta');
-  assert.ok(/shouldUseRecord\(blob, state\.audioDurSec, state\.audioCh\)/.test(fn), 'shouldUseRecord 应带真实时长与声道数');
+  assert.ok(/shouldUseRecord\(blob, (?:state|S)\.audioDurSec, (?:state|S)\.audioCh\)/.test(fn), 'shouldUseRecord 应带真实时长与声道数');
   assert.ok(/await probeAudioChannels\(blob\)/.test(fn), 'runAsr 应调用 probeAudioChannels 探测声道');
 });
 test('播放全程静音：增益节点设 0', () => {
@@ -383,9 +383,9 @@ test('五阶段进度：download / probe / decode / record / transcribe / merge'
 });
 test('实时字幕流：转写过程持续回填 preview', () => {
   const fn = extractFunc('recorderAsr');
-  assert.ok(/state\.asr\.preview = segsAll\.slice\(-40\)/.test(fn), '录制路应回填 preview');
+  assert.ok(/(?:state|S)\.asr\.preview = segsAll\.slice\(-40\)/.test(fn), '录制路应回填 preview');
   const rf = extractFunc('runAsr');
-  assert.ok(/state\.asr\.preview = body\.slice\(-40\)/.test(rf), '分片路应回填 preview');
+  assert.ok(/(?:state|S)\.asr\.preview = body\.slice\(-40\)/.test(rf), '分片路应回填 preview');
 });
 test('转写完成发系统通知（GM_notification）', () => {
   assert.ok(/@grant\s+GM_notification/.test(src), '头部应声明 @grant GM_notification');
@@ -535,12 +535,12 @@ test('getSubtitles 捕获世代号 myGen', () => {
 });
 test('getSubtitles 每个 await 后都有 asrStop 守卫（≥4 处）', () => {
   const fn = extractFunc('getSubtitles');
-  const n = (fn.match(/asrStop\(myGen\)/g) || []).length;
+  const n = (fn.match(/asrStop\((?:[\w$]+, )?myGen\)/g) || []).length;
   assert.ok(n >= 4, 'asrStop 守卫应 ≥4 处（resolve/fetchSubs/fetchBody/translateBody/catch），实际 ' + n + ' 处');
 });
 test('getSubtitles 守卫触发时直接 return（旧结果不写回）', () => {
   const fn = extractFunc('getSubtitles');
-  assert.ok(/if\s*\(asrStop\(myGen\)\)\s*return;/.test(fn), '守卫应形如 if (asrStop(myGen)) return;');
+  assert.ok(/if\s*\(asrStop\((?:[\w$]+, )?myGen\)\)\s*return;/.test(fn), '守卫应形如 if (asrStop(myGen)) return;');
 });
 
 console.log('\n结果：' + passed + ' 通过，' + failed + ' 失败');

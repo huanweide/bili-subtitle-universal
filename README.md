@@ -10,8 +10,11 @@
 > 有官方字幕就秒取（免 Key、不花钱），没有就用 AI 听写，**3 小时长视频也能稳稳跑完**。
 > ⭐ 如果它帮你省下了一整晚，右上角点个 Star 就是最好的反馈。
 
+> 🗂 **v9.18**：解析跑着的时候切走视频也不会中断，跑完自动留存最近 5 条结果，可逐条查看、单条复制。
+> 搜索框直接贴 BV 号或链接，一键打开并自动解析。
+
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.17.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.18.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -22,6 +25,16 @@
 [界面预览](#界面预览) · [30 秒看懂](#30-秒看懂) · [它能做什么](#它能做什么) · [特性](#特性-features) · [快速开始](#快速开始-quick-start) · [架构](#架构-architecture) · [边界](#安全边界) · [路线图](#路线图-roadmap) · [贡献](#贡献-contributing)
 
 ---
+
+## 你是哪种人
+
+| 你是 | 从这里开始 |
+|---|---|
+| **只想把字幕拿出来**，不写代码 | [快速开始](#快速开始-quick-start)：装 Tampermonkey → 装脚本 → 点 ⚡ |
+| **视频没字幕**，要 AI 听写 | 同上，再到 ⚙ 设置填一个 API Key（有免费额度的厂商已标注） |
+| **要批量取**，边跑边切别的视频 | 打开「🗂 历史结果」，最近 5 条自动留存，逐条复制 |
+| **想接自己的站点或厂商** | [加一个你自己的站点](#加一个你自己的站点--厂商) |
+| **想跑测试 / 提 PR** | [贡献](#贡献-contributing)，一条命令：`node tests/run-tests.js` |
 
 ## 30 秒看懂
 
@@ -99,6 +112,7 @@ User: 打开一个嵌了 player.bilibili.com/player.html 的网页
 
 ## 特性 / Features
 
+- **解析结果留存 (JobArchive)** — 转写任务与页面解耦：切到别的视频不会中断，跑完自动归档最近 5 条，可逐条查看与单条复制；手动「中断」才真正停止
 - **认领表引擎 (SiteMatch)** — 站点与页面形态的识别集中成一张可测试的表，不再散在正则里；没有播放器的页面一律不认领——认领了却取不到字幕，比不认领更伤信任。见 `modules/site-match.js`
 - **四层转写防线 (fallback ladder)** — 分段解码（首选，不播放、内存恒定）→ 整段直传（≤40MB）→ 解码切片（16kHz）→ 静音播放录制（兜底）；前一路不通自动走下一路，一条路堵不死
 - **断点闸门 (SegResume)** — 每批约 2 分钟音频转完即落盘，刷新 / 误关 / 断网后重转自动跳过已完成部分，**不花第二遍钱**；断点按「BV 号 + P 号 + 音频地址」识别，24 小时有效

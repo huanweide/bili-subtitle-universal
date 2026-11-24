@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.17.1
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；字幕解析正确性特化（VTT 结束时间/SRT 纯数字正文/TTML MM:SS/HTML 实体解码，均有变异测试防复发）；v9.2 新增搜索筛选 Tab（B站 wbi 搜索免 Key + YouTube Data API，自动探测候选有无字幕，有字幕优先、评分引擎默认权重排序、点卡片直接打开视频）、转写质量三层提升全部接线（热词注入自动取视频元数据+不支持自动降级 / 标点恢复+碎句合并+相邻去重默认开 / LLM 轻量纠错只改错字默认关）与双形态导出（AI 纯文本剥时间戳 / 章节锚点稿）；可选高质量翻译（任意 OpenAI 兼容模型）；新增「进入视频自动获取字幕并复制」开关（默认关）、字幕区改为可点击行列表（点行跳到对应时间，命中行高亮）。
+// @version      9.18.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；v9.18 新增「解析结果留存」：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索框改为 BV 号/链接直取，识别后一键打开并自动解析；设置面板按步骤分组并标注各厂商是否支持转写。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -1473,30 +1473,112 @@
   // </build:modules>
 
   // ===================== 状态 =====================
-  var state = {
-    adapter: null,     // 当前站点适配器
-    site: '',          // 'bilibili' | 'youtube' | 'html5' | ''
-    bvid: '', aid: '', cid: null,
-    videoId: '',       // YouTube videoId
-    title: '', up: '', desc: '', duration: 0,
-    page: 1, pageTitle: '', totalPages: 1,
-    subs: [],          // [{lan, lan_doc, urls:[], ai, kind}]
-    body: null,        // 当前字幕 body 数组 [{from,to,content}]
-    lan: '',
-    loading: false, err: '', noSub: false,
-    ytBlocked: '',     // YouTube 明确拒绝播放时的官方原因（playabilityStatus.reason）
-    subNeedLogin: false, // B站：该视频的字幕登录后才能看（need_login_subtitle）
-    asr: null,         // {phase, done, total, cancel, progress, chunks, eta, t0}
-    asrRan: false,
-    audioBlob: null,   // 已下载的音频 blob（复用）
-    audioBuf: null,    // 已解码的 AudioBuffer（复用）
-    audioDurSec: 0,    // 音频真实时长（秒）——选路与进度都靠它，不再猜
-    audioSizeMB: 0,    // 音频体积（MB）
-    searchKw: '',      // v9.9 字幕内检索词（空 = 不过滤）
-    shiftSec: 0,       // v9.11 时间轴整体偏移（秒，可正负；只影响导出时间戳与点击跳转）
-    rangeFrom: 0       // v9.11 只保留该时间点之后（0 = 不裁）
-  };
-  var cache = {};      // key -> body 数组
+  /**
+   * v9.17：state 从「一个写死的全局对象」改成「一份可复制的上下文」。
+   *
+   * 为什么必须改：旧实现只有一份 state，SPA 切视频时 resetForNewVideo() 会 asrGen++ 并把它清空，
+   * 于是正在跑的转写任务每一步都判定自己「过期」→ 直接 return，结果全丢。
+   *
+   * 现在每个解析任务持有自己的一份 state。执行期间 state 指向「任务那份」，
+   * 界面展示走 viewState()。切视频只是让任务「脱离页面」，不会让它停。
+   */
+  function makeState() {
+    return {
+      adapter: null,     // 当前站点适配器
+      site: '',          // 'bilibili' | 'youtube' | 'html5' | ''
+      bvid: '', aid: '', cid: null,
+      videoId: '',       // YouTube videoId
+      title: '', up: '', desc: '', duration: 0,
+      page: 1, pageTitle: '', totalPages: 1,
+      subs: [],          // [{lan, lan_doc, urls:[], ai, kind}]
+      body: null,        // 当前字幕 body 数组 [{from,to,content}]
+      lan: '',
+      loading: false, err: '', noSub: false,
+      ytBlocked: '',     // YouTube 明确拒绝播放时的官方原因（playabilityStatus.reason）
+      subNeedLogin: false, // B站：该视频的字幕登录后才能看（need_login_subtitle）
+      asr: null,         // {phase, done, total, cancel, progress, chunks, eta, t0}
+      asrRan: false,
+      audioBlob: null,   // 已下载的音频 blob（复用）
+      audioBuf: null,    // 已解码的 AudioBuffer（复用）
+      audioDurSec: 0,    // 音频真实时长（秒）——选路与进度都靠它，不再猜
+      audioSizeMB: 0,    // 音频体积（MB）
+      searchKw: '',      // v9.9 字幕内检索词（空 = 不过滤）
+      shiftSec: 0,       // v9.11 时间轴整体偏移（秒，可正负；只影响导出时间戳与点击跳转）
+      rangeFrom: 0,      // v9.11 只保留该时间点之后（0 = 不裁）
+      // v9.17：这份 state 属于哪条任务 / 哪个页面
+      jobId: 0,
+      jobUrl: '',        // 任务发起时的地址（用于回到该视频）
+      detached: false    // true = 用户已切走，任务在后台继续
+    };
+  }
+  var state = makeState();   // 当前「执行上下文」：有任务时指向任务自己的 state
+  var pageState = state;     // 当前页面（用户正看的视频）的 state，解析任务不会覆盖它
+  var cache = {};            // key -> body 数组
+
+  // ===================== v9.17 解析任务队列 + 结果留存 =====================
+  /**
+   * 旧行为：点「获取字幕」→ 直接跑；切视频 → asrGen++ → 正在跑的任务全部作废。
+   * 新行为：
+   *   · 任务进入队列，同一时间只跑一个（音频解码吃内存，并发反而更慢更易崩）；
+   *   · 用户切走视频时任务标记 detached，继续跑，不被取消；
+   *   · 跑完的结果自动归档到 jobHistory，最多留 5 条，可点开查看 / 单条复制；
+   *   · 用户手动点「取消」才真正中断。
+   */
+  var JOBS_MAX = 5;         // 最多留几份结果
+  var JOB_QUEUE_MAX = 5;    // 最多排几个等待任务
+  var jobQueue = [];        // 待执行 [{id, url, bvid, title, autoCopy}]
+  var jobActive = null;     // 正在执行 {id, state, url, bvid, title, startedAt}
+  var jobHistory = [];      // 已完成 [{id, bvid, url, title, up, lan, body, createdAt, source, page, totalPages}]
+  var jobSeq = 0;
+  var viewingJobId = 0;     // >0 = 正在查看某条历史结果（只读视图）
+  var pendingAutoBvid = ''; // v9.17：BV 直取卡片跳转后，到达该视频要自动解析
+
+  function newJobId() { return ++jobSeq; }
+
+  /** 当前应该渲染/操作的那份状态：查看历史 > 后台任务 > 当前页面 */
+  function viewState() {
+    if (viewingJobId) {
+      var h = findJob(viewingJobId);
+      if (h) {
+        // 历史条目只有 body/标题等少数字段，补成一份「只读视图」，
+        // 否则 render 读 subs/adapter 会崩。每次复用同一个对象，避免频繁 render 抖动。
+        if (h._view) return h._view;
+        h._view = {
+          adapter: null, site: '', bvid: h.bvid || '', aid: '', cid: null, videoId: '',
+          title: h.title || '', up: h.up || '', desc: '', duration: 0,
+          page: h.page || 1, pageTitle: '', totalPages: h.totalPages || 1,
+          subs: [], body: h.body || [], lan: h.lan || '',
+          loading: false, err: '', noSub: false, ytBlocked: '', subNeedLogin: false,
+          asr: null, asrRan: false,
+          audioBlob: null, audioBuf: null, audioDurSec: 0, audioSizeMB: 0,
+          searchKw: '', shiftSec: 0, rangeFrom: 0,
+          jobId: h.id, jobUrl: h.url || '', detached: false,
+          historyView: true
+        };
+        return h._view;
+      }
+    }
+    // 后台任务不占据主视图：页面始终显示「当前视频」，任务进度走顶部提示条。
+    // 这样用户切走后不会看到「标题还是上一个视频」的错乱感。
+    return state;
+  }
+  function findJob(id) {
+    for (var i = 0; i < jobHistory.length; i++) if (jobHistory[i].id === id) return jobHistory[i];
+    return null;
+  }
+  function trimHistory() {
+    while (jobHistory.length > JOBS_MAX) jobHistory.pop();   // 新的在前，旧的从尾部淘汰
+  }
+  function pushHistory(entry) {
+    if (!entry || !entry.body || !entry.body.length) return null;
+    for (var i = 0; i < jobHistory.length; i++) {
+      if (jobHistory[i].bvid && jobHistory[i].bvid === entry.bvid) { jobHistory.splice(i, 1); break; }
+    }
+    jobHistory.unshift(entry);
+    trimHistory();
+    return entry;
+  }
+  function queueLength() { return jobQueue.length + (jobActive ? 1 : 0); }
 
   // ===================== 设置（持久化） =====================
   var SETTINGS = {
@@ -2239,7 +2321,7 @@
   // 关键修复：彻底废弃「MediaElementSource + 实时 AudioContext 跨接 OfflineAudioContext」的错误路线，
   // 改为「decodeAudioData 整体解码 -> OfflineAudioContext 按片重采样」的同上下文正确路线。
 
-  function downloadAudio(url) {
+  function downloadAudio(S, url) {
     return new Promise(function (resolve, reject) {
       GM_xmlhttpRequest({
         method: 'GET', url: url, responseType: 'blob',
@@ -2253,7 +2335,7 @@
         onerror: function () { reject(new Error('音频下载网络错误')); },
         ontimeout: function () { reject(new Error('音频下载超时')); },
         onprogress: function (p) {
-          if (state.asr && p && p.lengthComputable) { state.asr.progress = Math.round(p.loaded / p.total * 100); render(); }
+          if (S.asr && p && p.lengthComputable) { S.asr.progress = Math.round(p.loaded / p.total * 100); render(); }
         }
       });
     });
@@ -2671,84 +2753,94 @@
     return splitTextByTime(txt, start, end);
   }
 
-  function markChunk(idx, st) { if (state.asr && state.asr.chunks && state.asr.chunks[idx]) state.asr.chunks[idx].state = st; render(); }
-  function updateEta(done) {
-    if (!state.asr || !done) return;
-    var elapsed = (Date.now() - state.asr.t0) / 1000;
-    state.asr.eta = Math.round((elapsed / done) * Math.max(0, state.asr.total - done));
+  function markChunk(S, idx, st) { if (S.asr && S.asr.chunks && S.asr.chunks[idx]) S.asr.chunks[idx].state = st; render(); }
+  function updateEta(S, done) {
+    if (!S.asr || !done) return;
+    var elapsed = (Date.now() - S.asr.t0) / 1000;
+    S.asr.eta = Math.round((elapsed / done) * Math.max(0, S.asr.total - done));
   }
   var asrGen = 0;   // 世代号：SPA 切视频 +1，旧 ASR 任务据此判定过期（stale），不再污染新视频
   var asrEstTs = false;   // 本轮转写里是否有「接口只给纯文本、没给时间戳」的情况（时间轴是估算的，要告诉用户）
-  function asrStop(myGen) { return myGen !== asrGen || !!(state.asr && state.asr.cancel); }
-  function finishAsr() { state.asr = null; state.loading = false; cleanupAudio(); render(); }
+  function asrStop(S, myGen) { return myGen !== asrGen || !!(S.asr && S.asr.cancel); }
+  function finishAsr(S) { S.asr = null; S.loading = false; cleanupAudio(S); render(); }
 
-  function cleanupAudio() {
-    state.audioBlob = null;
-    state.audioBuf = null;
+  function cleanupAudio(S) {
+    S.audioBlob = null;
+    S.audioBuf = null;
     try { stopRecorder(); } catch (e) {}
   }
 
   async function runAsr() {
+    var S = state;   // v9.17：锁定本次任务的上下文，切视频不影响它
+
+    // v9.17：登记为「活动任务」。此后 S 一直指向这份上下文，
+    // 用户切视频只会把 S.detached 置 true，任务本身继续跑。
+    jobActive = {
+      id: newJobId(), state: S, url: location.href,
+      bvid: S.bvid, title: S.title, startedAt: Date.now()
+    };
+    try {
+
     var myGen = asrGen;
-    state.asrRan = true;
+    S.asrRan = true;
     if (!currentProvider().supportsAudio) {
-      state.err = '当前 AI 厂商「' + currentProvider().label + '」没有语音转写端点（如 DeepSeek 只做对话），请到 ⚙ 设置切换为硅基流动 / OpenAI / OpenRouter，或在「自定义」里填音频端点';
-      state.loading = false; render(); return;
+      S.err = '当前 AI 厂商「' + currentProvider().label + '」没有语音转写端点（如 DeepSeek 只做对话），请到 ⚙ 设置切换为硅基流动 / OpenAI / OpenRouter，或在「自定义」里填音频端点';
+      S.loading = false; render(); return;
     }
     if (!SETTINGS.aiKey) {
       var pk = currentProvider();
-      state.err = '未配置 AI API Key（⚙ 设置 → 选厂商并填入 Key' + (pk.freeNote ? '；' + pk.freeNote : '') + '）';
-      state.loading = false; render(); return;
+      S.err = '未配置 AI API Key（⚙ 设置 → 选厂商并填入 Key' + (pk.freeNote ? '；' + pk.freeNote : '') + '）';
+      S.loading = false; render(); return;
     }
-    var ck = 'asr_' + (state.bvid || state.videoId || state.aid || state.title);
+    var ck = 'asr_' + (S.bvid || S.videoId || S.aid || S.title);
     if (cache[ck]) {
-      state.body = cache[ck]; state.lan = 'ASR·缓存';
-      state.loading = false; render(); toast('已使用上次转写结果'); return;
+      S.body = cache[ck]; S.lan = 'ASR·缓存';
+      S.loading = false; render(); toast('已使用上次转写结果'); return;
     }
-    state.loading = true; state.err = ''; asrEstTs = false;
-    state.asr = { phase: '获取音频流', done: 0, total: 0, cancel: false, progress: null, chunks: [], eta: 0, t0: Date.now() };
+    S.loading = true; S.err = ''; asrEstTs = false;
+    S.asr = { phase: '获取音频流', done: 0, total: 0, cancel: false, progress: null, chunks: [], eta: 0, t0: Date.now() };
     render();
     try {
-      var ad = state.adapter;
+      var ad = S.adapter;
       var audioUrl = ad.getAudio ? await ad.getAudio() : null;
       if (!audioUrl) {
         var hint = (ad.id === 'youtube') ? 'YouTube 音频需解流媒体签名，暂不支持 AI 转写（请使用 YouTube 官方/自动字幕）'
           : (ad.id === 'html5' ? '该视频使用流媒体播放，无法直接取音频（请改用带直链视频或官方字幕的页面）' : '该站点不支持音频转写');
         throw new Error(hint);
       }
-      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
-      state.asr.phase = '下载音频'; state.asr.progress = 0; state.asr.stage = 'download'; render();
-      var blob = state.audioBlob || await downloadAudio(audioUrl);
-      state.audioBlob = blob;
-      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+      if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
+      S.asr.phase = '下载音频'; S.asr.progress = 0; S.asr.stage = 'download'; render();
+      var blob = S.audioBlob || await downloadAudio(S, audioUrl);
+      S.audioBlob = blob;
+      if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
 
       // v8.2.0：读音频真实时长，选路不再靠猜
-      if (!state.audioDurSec) {
-        state.asr.phase = '读取音频信息'; state.asr.stage = 'probe'; render();
+      if (!S.audioDurSec) {
+        S.asr.phase = '读取音频信息'; S.asr.stage = 'probe'; render();
         var probedDur = await probeAudioMeta(blob);
-        if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
-        state.audioDurSec = probedDur || (state.duration || 0);
+        if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
+        S.audioDurSec = probedDur || (S.duration || 0);
       }
-      if (!state.audioCh) {
+      if (!S.audioCh) {
         // 声道数决定解码内存：decodeAudioData 不会把立体声降成单声道，必须知道真实声道数
-        state.audioCh = await probeAudioChannels(blob);
-        if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+        S.audioCh = await probeAudioChannels(blob);
+        if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
       }
-      state.audioSizeMB = Math.round(blob.size / (1024 * 1024));
-      state.asr.durSec = state.audioDurSec;
-      state.asr.sizeMB = state.audioSizeMB;
-      state.asr.ch = state.audioCh;
+      S.audioSizeMB = Math.round(blob.size / (1024 * 1024));
+      S.asr.durSec = S.audioDurSec;
+      S.asr.sizeMB = S.audioSizeMB;
+      S.asr.ch = S.audioCh;
       render();
 
       var body = [];
 
       // ① 音频不大（≤25MB）：整段直传（原始格式，不解码，快）
       if (blob.size <= MAX_SINGLE) {
-        state.asr.stage = 'transcribe';
-        state.asr.phase = 'AI 转写（整段直传）'; state.asr.total = 1; state.asr.done = 0; render();
+        S.asr.stage = 'transcribe';
+        S.asr.phase = 'AI 转写（整段直传）'; S.asr.total = 1; S.asr.done = 0; render();
         try {
           var text0 = await transcribeWav(blob, 'audio.m4a');
-          var dur0 = state.duration || 0;
+          var dur0 = S.duration || 0;
           body = asrToSegments(text0, 0, dur0 || 1);
         } catch (e) {
           if (/(401|Authentication|api[ -]?key)/i.test(e.message)) throw e;
@@ -2762,16 +2854,16 @@
         var segBody = null;
         if (SETTINGS.asrLongMode !== 'record') {
           try {
-            state.asr.stage = 'decode';
-            state.asr.phase = '读取分片目录';
-            state.asr.progress = null;
+            S.asr.stage = 'decode';
+            S.asr.phase = '读取分片目录';
+            S.asr.progress = null;
             render();
             var segInfo = await probeSegments(audioUrl);
-            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+            if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
             log('分段解码可用：共 ' + segInfo.segs.length + ' 片，覆盖 ' + Math.round(segInfo.totalSec) + ' 秒，合计 ' + Math.round(segInfo.bytes / 1024 / 1024) + 'MB');
-            segBody = await segmentAsr(audioUrl, segInfo, myGen);
+            segBody = await segmentAsr(S, audioUrl, segInfo, myGen);
           } catch (eSeg) {
-            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+            if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
             log('分段解码不可用，回落到整段解码 / 播放录制', eSeg);
             segBody = null;
           }
@@ -2782,53 +2874,53 @@
       // ③ 分段路不通时：优先「整体解码分片」（秒级）；解码失败或音频超大自动降级「播放录制」（稳）
       if (!body.length) {
         var audioBuf = null;
-        var useRec = shouldUseRecord(blob, state.audioDurSec, state.audioCh);
+        var useRec = shouldUseRecord(blob, S.audioDurSec, S.audioCh);
         if (!useRec) {
-          state.asr.stage = 'decode';
-          state.asr.phase = '解码音频到 16kHz' + (state.audioCh === 1 ? '单声道' : '') + '（约 ' + estimateDecodedMB(blob, state.audioDurSec, state.audioCh) + 'MB 内存）';
-          state.asr.progress = null; render();
+          S.asr.stage = 'decode';
+          S.asr.phase = '解码音频到 16kHz' + (S.audioCh === 1 ? '单声道' : '') + '（约 ' + estimateDecodedMB(blob, S.audioDurSec, S.audioCh) + 'MB 内存）';
+          S.asr.progress = null; render();
           try {
-            audioBuf = state.audioBuf || await decodeAudio(blob);
-            state.audioBuf = audioBuf;
+            audioBuf = S.audioBuf || await decodeAudio(blob);
+            S.audioBuf = audioBuf;
             // 复核：解码结果的真实声道数可能与估算不符，超阈值就提示（已解出来的内存无法退回，但至少让用户知道风险）
-            if (audioBuf && audioBuf.numberOfChannels > 1 && state.audioCh !== 2) {
-              state.audioCh = audioBuf.numberOfChannels;
-              var realMB = estimateDecodedMB(blob, state.audioDurSec, state.audioCh);
-              log('解码结果实际为 ' + state.audioCh + ' 声道，占用约 ' + realMB + 'MB');
+            if (audioBuf && audioBuf.numberOfChannels > 1 && S.audioCh !== 2) {
+              S.audioCh = audioBuf.numberOfChannels;
+              var realMB = estimateDecodedMB(blob, S.audioDurSec, S.audioCh);
+              log('解码结果实际为 ' + S.audioCh + ' 声道，占用约 ' + realMB + 'MB');
             }
           } catch (eDec) {
-            if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
+            if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
             log('整体解码失败（' + decodeFailReason(eDec, blob) + '），自动降级播放录制', eDec);
-            state.audioBuf = null; audioBuf = null;
+            S.audioBuf = null; audioBuf = null;
             useRec = true;
           }
         }
         if (useRec) {
           // 播放录制兜底：隐藏 audio 倍速播放 + captureStream 实时重采样，内存恒定，3 小时也能转
-          var recBody = await recorderAsr(blob);
+          var recBody = await recorderAsr(S, blob);
           body = recBody || [];
         } else {
-        var dur = audioBuf.duration || state.duration || 0;
+        var dur = audioBuf.duration || S.duration || 0;
         if (dur <= 0) throw new Error('无法获取音频时长');
         var chunkDur = Math.min(SETTINGS.asrChunkMin * 60, dur);
         var chunks = Math.max(1, Math.ceil(dur / chunkDur));
-        state.asr.stage = 'transcribe';
-        state.asr.total = chunks; state.asr.phase = 'AI 转写（分片）';
-        state.asr.chunks = [];
-        for (var i = 0; i < chunks; i++) state.asr.chunks.push({ i: i, start: i * chunkDur, state: 'queued' });
+        S.asr.stage = 'transcribe';
+        S.asr.total = chunks; S.asr.phase = 'AI 转写（分片）';
+        S.asr.chunks = [];
+        for (var i = 0; i < chunks; i++) S.asr.chunks.push({ i: i, start: i * chunkDur, state: 'queued' });
         render();
         // 流水线：转写第 N 片的同时预渲染第 N+1 片（渲染快、转写慢，重叠省时间）
         var nextStart = 0;
         var next = renderChunk(audioBuf, 0, Math.min(chunkDur, dur), 16000);
         for (var i2 = 0; i2 < chunks; i2++) {
-          if (asrStop(myGen)) break;
-          markChunk(i2, 'working');
+          if (asrStop(S, myGen)) break;
+          markChunk(S, i2, 'working');
           var rendered = await next;
           if (i2 + 1 < chunks) {
             nextStart = (i2 + 1) * chunkDur;
             next = renderChunk(audioBuf, nextStart, Math.min(chunkDur, dur - nextStart), 16000);
           }
-          if (!rendered) { markChunk(i2, 'fail'); state.asr.done = i2 + 1; updateEta(i2 + 1); render(); continue; }
+          if (!rendered) { markChunk(S, i2, 'fail'); S.asr.done = i2 + 1; updateEta(S, i2 + 1); render(); continue; }
           var wav = wavFromBuffer(rendered);
           var text = null;
           try {
@@ -2836,9 +2928,9 @@
           } catch (e) {
             if (/(size|large|exceed|limit|too\s+(big|long)|文件大小|过大|过长)/i.test(e.message)) {
               // 该片超限：对半拆小递归重转
-              var sub = await splitProcess(audioBuf, i2 * chunkDur, Math.min(chunkDur, dur - i2 * chunkDur), 0);
-              markChunk(i2, 'done');
-              state.asr.done = i2 + 1; updateEta(i2 + 1); render();
+              var sub = await splitProcess(S, audioBuf, i2 * chunkDur, Math.min(chunkDur, dur - i2 * chunkDur), 0);
+              markChunk(S, i2, 'done');
+              S.asr.done = i2 + 1; updateEta(S, i2 + 1); render();
               body = body.concat(sub);
               continue;
             }
@@ -2848,30 +2940,30 @@
           // 旧代码把片起点直接传进 splitTextByTime 又加了一次偏移 = 时间戳整体翻倍后移。
           var segs = asrToSegments(text, 0, Math.min(chunkDur, dur - i2 * chunkDur));
           segs.forEach(function (s) { s.from += i2 * chunkDur; s.to += i2 * chunkDur; });
-          markChunk(i2, 'done');
+          markChunk(S, i2, 'done');
           body = body.concat(segs);
-          state.asr.preview = body.slice(-40);   // 实时字幕流：边转边长
-          state.asr.done = i2 + 1; updateEta(i2 + 1); render();
+          S.asr.preview = body.slice(-40);   // 实时字幕流：边转边长
+          S.asr.done = i2 + 1; updateEta(S, i2 + 1); render();
         }
         }
       }
 
-      if (asrStop(myGen)) {
+      if (asrStop(S, myGen)) {
         // 同代取消 → 「保留已转写内容」落到实处（写回界面+缓存）；stale（SPA 切视频）→ 旧视频结果一律丢弃
         if (body.length && myGen === asrGen) {
           var mCancel = mergeBodies([{ body: body }]);
           mCancel.incomplete = true;
           mCancel = maybePolish(mCancel);
-          state.body = mCancel;
-          state.lan = 'ASR·取消';
+          S.body = mCancel;
+          S.lan = 'ASR·取消';
           cache[ck] = mCancel;
         }
-        if (myGen === asrGen) { finishAsr(); toast(body.length ? ('已取消（保留已转写 ' + body.length + ' 句）') : '已取消'); }
+        if (myGen === asrGen) { finishAsr(S); toast(body.length ? ('已取消（保留已转写 ' + body.length + ' 句）') : '已取消'); }
         return;
       }
       if (!body.length) throw new Error('转写结果为空');
-      state.asr.stage = 'merge';
-      state.asr.phase = '合并时间轴并排序';
+      S.asr.stage = 'merge';
+      S.asr.phase = '合并时间轴并排序';
       render();
       var merged = mergeBodies([{ body: body }]);
       merged.incomplete = !!(body && body.incomplete);   // 录制中途收尾时如实标记，界面会提示「字幕可能不完整」
@@ -2879,28 +2971,56 @@
       merged = maybePolish(merged);
       // 接口没给时间戳 → 如实标记，界面会提示「时间轴为估算」，不假装是精确时间轴
       merged.estTs = asrEstTs;
-      state.body = merged;
-      state.lan = 'ASR·' + (SETTINGS.asrLang === 'auto' ? '自动' : (LANG_NAMES[SETTINGS.asrLang] || SETTINGS.asrLang));
+      S.body = merged;
+      S.lan = 'ASR·' + (SETTINGS.asrLang === 'auto' ? '自动' : (LANG_NAMES[SETTINGS.asrLang] || SETTINGS.asrLang));
       cache[ck] = merged;
-      var spentSec = state.asr.t0 ? Math.round((Date.now() - state.asr.t0) / 1000) : 0;
-      cleanupAudio();
-      state.asr = null; state.loading = false; render();
+      var spentSec = S.asr.t0 ? Math.round((Date.now() - S.asr.t0) / 1000) : 0;
+      cleanupAudio(S);
+      S.asr = null; S.loading = false; render();
       toast('已生成 ' + merged.length + ' 句转写字幕（用时 ' + fmtDur(spentSec) + '）'
         + (asrEstTs ? ' · ⚠ 接口未返回时间戳，时间轴为估算' : ''));
-      notifyDone('字幕转写完成', (state.title || '视频') + ' · ' + merged.length + ' 句 · 用时 ' + fmtDur(spentSec));
+      notifyDone('字幕转写完成', (S.title || '视频') + ' · ' + merged.length + ' 句 · 用时 ' + fmtDur(spentSec));
     } catch (e) {
       log(e);
-      if (asrStop(myGen)) { if (myGen === asrGen) finishAsr(); return; }
-      cleanupAudio();
-      state.err = 'AI 转写失败：' + e.message;
-      state.asr = null; state.loading = false; render();
+      if (asrStop(S, myGen)) { if (myGen === asrGen) finishAsr(S); return; }
+      cleanupAudio(S);
+      S.err = 'AI 转写失败：' + e.message;
+      S.asr = null; S.loading = false; render();
+    }
+    } finally {
+      endJob(S);   // v9.17：不论成功、失败、取消，都收尾归档，避免任务悬挂
     }
   }
 
+  /**
+   * v9.17 任务收尾：注销活动任务，并把已有结果自动存进历史（最多 5 条）。
+   * 关键点：切视频不再销毁结果——用户切走后任务跑完，结果照样留在这里。
+   */
+  function endJob(S) {
+    if (!jobActive || jobActive.state !== S) return;
+    var job = jobActive;
+    jobActive = null;
+    S.loading = false;
+    if (S.asr) S.asr = null;
+    if (S.body && S.body.length) {
+      var hadDetached = !!S.detached;
+      pushHistory({
+        id: job.id, bvid: S.bvid, url: job.url, title: S.title, up: S.up,
+        lan: S.lan, body: S.body, createdAt: Date.now(),
+        source: (S.lan || '').indexOf('ASR') === 0 ? 'asr' : 'sub',
+        page: S.page, totalPages: S.totalPages,
+        incomplete: !!S.body.incomplete
+      });
+      if (hadDetached) toast('后台解析完成：' + (S.title || '视频') + ' · 已存入历史');
+    }
+    S.detached = false;
+    render();
+  }
+
   // 大文件分片重试：转写失败则对半拆小递归
-  async function splitProcess(audioBuf, start, dur, depth) {
+  async function splitProcess(S, audioBuf, start, dur, depth) {
     var myGen = asrGen;
-    if (asrStop(myGen)) return [];
+    if (asrStop(S, myGen)) return [];
     try {
       var rendered = await renderChunk(audioBuf, start, dur, 16000);
       var wav = wavFromBuffer(rendered);
@@ -2911,8 +3031,8 @@
     } catch (e) {
       if (depth < 3 && dur > 300) {
         var half = dur / 2;
-        var a = await splitProcess(audioBuf, start, half, depth + 1);
-        var b = await splitProcess(audioBuf, start + half, half, depth + 1);
+        var a = await splitProcess(S, audioBuf, start, half, depth + 1);
+        var b = await splitProcess(S, audioBuf, start + half, half, depth + 1);
         return a.concat(b);
       }
       throw e;
@@ -3037,9 +3157,9 @@
   }
 
   // 分段解码主流程：并发下载 → 逐片解码 → 攒批识别 → 精确时间戳
-  async function segmentAsr(url, info, myGen) {
+  async function segmentAsr(S, url, info, myGen) {
     var initBuf = await fetchRange(url, 0, info.initEnd - 1);
-    if (asrStop(myGen)) return [];
+    if (asrStop(S, myGen)) return [];
 
     // 按时间攒批
     var batches = [], cur = null;
@@ -3053,25 +3173,25 @@
       cur.endSec = s.startSec + s.durSec;
     }
 
-    state.asr.stage = 'transcribe';
-    state.asr.total = batches.length;
+    S.asr.stage = 'transcribe';
+    S.asr.total = batches.length;
     // v9.4 断点续传：同一条视频（bvid + cid + 音频地址）24 小时内的断点直接接着跑。
     // 读存储按脏数据对待（校验全在 SegResume 模块里），这里再包一层 try——
     // 存储 API 本身出问题也不能挡住转写，大不了从头来。
     var resume = null;
     try {
-      resume = SegResume.loadResume(GM_getValue, Date.now(), state.bvid || '', state.cid, url);
+      resume = SegResume.loadResume(GM_getValue, Date.now(), S.bvid || '', S.cid, url);
     } catch (eR) { resume = null; }
     var doneCount = resume ? Math.min(resume.doneCount, batches.length) : 0;
     var segsAll = resume ? resume.segs : [];
     if (doneCount > 0) {
       log('断点续传：跳过已完成的 ' + doneCount + '/' + batches.length + ' 批，从第 ' + (doneCount + 1) + ' 批继续（想全部重来可点「↺ 重新开始」）');
     }
-    state.asr.resumed = doneCount > 0;
-    state.asr.resumeTip = doneCount > 0 ? ('已从断点继续：前 ' + doneCount + '/' + batches.length + ' 批沿用上次转写结果') : '';
-    state.asr.done = doneCount;
-    state.asr.chunks = batches.map(function (b, bi) { return { i: 0, start: b.startSec, state: bi < doneCount ? 'done' : 'queued' }; });
-    state.asr.preview = segsAll.slice(-40);
+    S.asr.resumed = doneCount > 0;
+    S.asr.resumeTip = doneCount > 0 ? ('已从断点继续：前 ' + doneCount + '/' + batches.length + ' 批沿用上次转写结果') : '';
+    S.asr.done = doneCount;
+    S.asr.chunks = batches.map(function (b, bi) { return { i: 0, start: b.startSec, state: bi < doneCount ? 'done' : 'queued' }; });
+    S.asr.preview = segsAll.slice(-40);
     render();
 
     // 并发下载一批分片
@@ -3079,7 +3199,7 @@
       var out = new Array(items.length), idx = 0;
       async function worker() {
         while (idx < items.length) {
-          if (asrStop(myGen)) return;
+          if (asrStop(S, myGen)) return;
           var i = idx++;
           out[i] = await fetchRange(url, items[i].off, items[i].off + items[i].size - 1);
         }
@@ -3091,21 +3211,21 @@
     }
 
     for (var bi = doneCount; bi < batches.length; bi++) {
-      if (asrStop(myGen)) break;
+      if (asrStop(S, myGen)) break;
       var b = batches[bi];
-      if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'working';
-      state.asr.phase = '分段解码中（第 ' + (bi + 1) + '/' + batches.length + ' 批，每批约 ' + Math.round(SEG_BATCH_SEC / 60) + ' 分钟音频）';
-      state.asr.progress = null;
+      if (S.asr.chunks[bi]) S.asr.chunks[bi].state = 'working';
+      S.asr.phase = '分段解码中（第 ' + (bi + 1) + '/' + batches.length + ' 批，每批约 ' + Math.round(SEG_BATCH_SEC / 60) + ' 分钟音频）';
+      S.asr.progress = null;
       render();
 
       var raws = await fetchBatch(b.items);
-      if (asrStop(myGen)) break;
+      if (asrStop(S, myGen)) break;
 
       // 逐片解码（每片 = 说明书 + 该片数据）
       var decoded = [];
       var okAll = true;
       for (var di = 0; di < raws.length; di++) {
-        if (asrStop(myGen)) { okAll = false; break; }
+        if (asrStop(S, myGen)) { okAll = false; break; }
         if (!raws[di]) continue;
         try {
           var blob = new Blob([initBuf, raws[di]], { type: 'audio/mp4' });
@@ -3114,13 +3234,13 @@
           log('第 ' + bi + ' 批第 ' + di + ' 片解码失败', eSeg);
         }
       }
-      if (!okAll || asrStop(myGen)) break;
+      if (!okAll || asrStop(S, myGen)) break;
       if (!decoded.length) {
-        if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'fail';
-        state.asr.done = bi + 1;
+        if (S.asr.chunks[bi]) S.asr.chunks[bi].state = 'fail';
+        S.asr.done = bi + 1;
         // v9.4：整批解码全失败，不把这批记成「已完成」——下次续传重试这批。
         // 否则一个网络抖动就会在 3 小时稿子里留下永久缺口，而用户毫无知觉。
-        try { SegResume.saveResume(GM_setValue, Date.now(), state.bvid || '', state.cid, url, bi, segsAll); } catch (eW) {}
+        try { SegResume.saveResume(GM_setValue, Date.now(), S.bvid || '', S.cid, url, bi, segsAll); } catch (eW) {}
         render();
         continue;
       }
@@ -3128,20 +3248,20 @@
       var mono = toMono(decoded);
       var wav = pcm16kToWav(mono);
       var txt = await transcribeWav(wav, 'seg.wav');
-      if (asrStop(myGen)) break;
+      if (asrStop(S, myGen)) break;
 
       // 0 基窗口：批起点由下面统一加上（sidx 给的精确时间）
       var segs = asrToSegments(txt, 0, b.endSec - b.startSec);
       segs.forEach(function (x) { x.from += b.startSec; x.to += b.startSec; });   // 批起点是 sidx 给的精确时间
       segsAll = segsAll.concat(segs);
-      if (state.asr.chunks[bi]) state.asr.chunks[bi].state = 'done';
-      state.asr.done = bi + 1;
-      state.asr.preview = segsAll.slice(-40);
+      if (S.asr.chunks[bi]) S.asr.chunks[bi].state = 'done';
+      S.asr.done = bi + 1;
+      S.asr.preview = segsAll.slice(-40);
       // v9.4：每批完成即落盘。增长式数组每批全量写一次（3 小时约百批、终稿约
       // 250KB，总量可接受），换来的是任何时刻中断都不丢已完成部分。
       // 空批（纯音乐段）也算已完成——没有内容可重做。
       try {
-        if (!SegResume.saveResume(GM_setValue, Date.now(), state.bvid || '', state.cid, url, bi + 1, segsAll)) {
+        if (!SegResume.saveResume(GM_setValue, Date.now(), S.bvid || '', S.cid, url, bi + 1, segsAll)) {
           log('断点数据超过大小上限，本轮不再保存断点（不影响本次转写）');
         }
       } catch (eW) { log('断点保存失败（不影响本次转写）', eW); }
@@ -3151,10 +3271,10 @@
     // 只有整轮跑完才清断点。用户主动取消走的是 asrStop break，到不了这个判断，
     // 断点原样保留——那正是续传存在的意义。留一个「全部完成」的 stale 断点没有
     // 价值，还会让下次误判为可续传。
-    if (!asrStop(myGen)) {
+    if (!asrStop(S, myGen)) {
       try { SegResume.clearResume(GM_setValue); } catch (eC) {}
     }
-    if (segsAll.length && state.asr) state.asr.progress = 100;
+    if (segsAll.length && S.asr) S.asr.progress = 100;
     return segsAll;
   }
 
@@ -3204,9 +3324,9 @@
     return wavFromBuffer(fake);
   }
 
-  async function recorderAsr(blob) {
+  async function recorderAsr(S, blob) {
     var myGen = asrGen;
-    if (asrStop(myGen)) return [];
+    if (asrStop(S, myGen)) return [];
     var RATE = Math.max(1, Math.min(16, SETTINGS.asrPlayRate || 4));
     var chunkSecOrig = Math.min((SETTINGS.asrChunkMin || 10) * 60, 720); // 单片原时长 ≤12min，wav 体积受控
     var segsAll = [];
@@ -3229,7 +3349,7 @@
       audio.onerror = function () { clearTimeout(t); res(0); };
     });
     if (!(totalDur > 0)) { stopRecorder(); throw new Error('播放器无法读取该音频（格式不受支持或文件损坏）'); }
-    if (asrStop(myGen)) { stopRecorder(); return []; }
+    if (asrStop(S, myGen)) { stopRecorder(); return []; }
     // v8.2.0 三处升级：①改用 createMediaElementSource 接管音频输出（数据直接进 Web Audio 图，比 captureStream 稳）
     // ②末端接一个增益 0 的节点 —— 播放照常推进，扬声器一声不出（不会再听到倍速怪声）
     // ③抓数据从 ScriptProcessor 换成 AudioWorklet（音频独立线程，页面卡顿也不丢帧），老浏览器自动退回旧写法
@@ -3304,11 +3424,11 @@
         if (outLen >= sliceAt) takeSlice();
         // 低频刷新 UI 进度（0.5 秒一次，比旧版 0.8 秒更跟手，也不至于拖慢主线程）
         var now2 = performance.now();
-        if (now2 - lastUi > 500 && state.asr) {
+        if (now2 - lastUi > 500 && S.asr) {
           lastUi = now2;
           var ct = audio.currentTime || 0;
-          state.asr.progress = Math.max(0, Math.min(100, Math.round(ct / totalDur * 100)));
-          state.asr.playedSec = ct;
+          S.asr.progress = Math.max(0, Math.min(100, Math.round(ct / totalDur * 100)));
+          S.asr.playedSec = ct;
           render();
         }
       } catch (e) { log('录制回调异常', e); }
@@ -3347,7 +3467,7 @@
     consumerPromise = (async function () {
       try {
         while (true) {
-          if (asrStop(myGen)) break;
+          if (asrStop(S, myGen)) break;
           if (!pending.length) { if (stopNow) break; await sleep(120); continue; }
           // 背压：待转写切片积压 ≥3 片就先暂停播放，等转写完再继续（防长视频内存一路上涨）
           if (pending.length >= 3 && !pauseGate && !naturalEnd) {
@@ -3356,15 +3476,15 @@
           }
           var c = pending.shift();
           if (!c || c.samples.length < 8000) { maybeResume(); continue; }   // <0.5s 忽略（也不能漏掉背压复位）
-          if (asrStop(myGen)) break;
-          state.asr.phase = '🎙 播放录制转写（' + RATE + ' 倍速）'; state.asr.progress = null;
+          if (asrStop(S, myGen)) break;
+          S.asr.phase = '🎙 播放录制转写（' + RATE + ' 倍速）'; S.asr.progress = null;
           render();
           var wav = pcm16kToWav(c.samples);
           var txt = null;
           try {
             txt = await transcribeWav(wav, 'rec.wav');
           } catch (e) {
-            if (asrStop(myGen)) break;   // 取消/切视频：本片丢弃
+            if (asrStop(S, myGen)) break;   // 取消/切视频：本片丢弃
             if (/(size|large|exceed|limit|too\s+(big|long)|文件大小|过大|过长)/i.test(e.message) && c.samples.length > 16000 * 60) {
               try {
                 var halfN = Math.floor(c.samples.length / 2);
@@ -3373,21 +3493,21 @@
                 // 先各自剥出文本再拼：两份 JSON 直接连起来是非法 JSON，会整段变成「没拿到文字」
                 txt = extractAsrText(segX) + '\n' + extractAsrText(segY);
               } catch (e2) {
-                if (asrStop(myGen)) break;
+                if (asrStop(S, myGen)) break;
                 throw e2;
               }
             } else throw e;
           }
           // 网络返回后再查一次取消/切视频：被丢弃的切片绝不混入结果、不刷新 UI
-          if (asrStop(myGen)) break;
+          if (asrStop(S, myGen)) break;
           // 0 基窗口：起点与倍速缩放由下面统一施加
           var segs = asrToSegments(txt, 0, c.wavDur);
           segs.forEach(function (s) { s.from = c.startOrig + s.from * c.kk; s.to = c.startOrig + s.to * c.kk; });
           segsAll = segsAll.concat(segs);
-          state.asr.done = (state.asr.done || 0) + 1;
-          state.asr.total = Math.max(state.asr.total || 1, state.asr.done);
+          S.asr.done = (S.asr.done || 0) + 1;
+          S.asr.total = Math.max(S.asr.total || 1, S.asr.done);
           // 实时字幕流：把刚转好的几句挂到界面上，边转边长（3 小时也看得见进展）
-          state.asr.preview = segsAll.slice(-40);
+          S.asr.preview = segsAll.slice(-40);
           maybeResume();
           render();
         }
@@ -3407,23 +3527,23 @@
     try {
       await audio.play();
     } catch (e) {
-      if (asrStop(myGen)) { stopRecorder(); return []; }
+      if (asrStop(S, myGen)) { stopRecorder(); return []; }
       if (!/NotAllowed|play\(\)|autoplay/i.test(String(e && e.message || e))) throw e;
-      state.asr.unlock = true; state.asr.phase = '🔇 浏览器拦截自动播放，请点击「解锁播放并继续」'; render();
+      S.asr.unlock = true; S.asr.phase = '🔇 浏览器拦截自动播放，请点击「解锁播放并继续」'; render();
       await new Promise(function (res) {
         recRef.unlockResolve = res;
         var iv = setInterval(function () {
-          if (asrStop(myGen)) { clearInterval(iv); if (recRef.unlockResolve === res) recRef.unlockResolve = null; res(); }
+          if (asrStop(S, myGen)) { clearInterval(iv); if (recRef.unlockResolve === res) recRef.unlockResolve = null; res(); }
         }, 200);
       });
-      if (asrStop(myGen)) { stopRecorder(); return []; }
+      if (asrStop(S, myGen)) { stopRecorder(); return []; }
     }
 
     // v8.2.0：播放全程静音（增益 0），只让播放位置往前推进，扬声器不出声
-    state.asr.phase = '🎧 静音播放录制中（' + RATE + ' 倍速，约 ' + Math.max(1, Math.round(totalDur / RATE / 60)) + ' 分钟，无声音，可最小化本页）';
-    state.asr.muted = true;
-    state.asr.total = Math.max(1, Math.ceil(totalDur / chunkSecOrig)); state.asr.done = 0;
-    state.asr.stage = 'record';
+    S.asr.phase = '🎧 静音播放录制中（' + RATE + ' 倍速，约 ' + Math.max(1, Math.round(totalDur / RATE / 60)) + ' 分钟，无声音，可最小化本页）';
+    S.asr.muted = true;
+    S.asr.total = Math.max(1, Math.ceil(totalDur / chunkSecOrig)); S.asr.done = 0;
+    S.asr.stage = 'record';
     render();
 
     // 等播放结束或用户取消（含停滞/意外暂停兜底，避免任何路径永久挂起）
@@ -3432,13 +3552,13 @@
       audio.onended = function () { naturalEnd = true; res(); };
       audio.onpause = function () {
         // 意外暂停（非取消、非自然结束）：尝试自动恢复一次
-        if (asrStop(myGen)) return;
+        if (asrStop(S, myGen)) return;
         if (pauseGate) return;   // 背压主动暂停，不属于意外，让它停着
         if (naturalEnd || audio.ended) return;
         setTimeout(function () { audio.play().catch(function () {}); }, 0);
       };
       var iv = setInterval(function () {
-        if (asrStop(myGen)) { clearInterval(iv); res(); return; }
+        if (asrStop(S, myGen)) { clearInterval(iv); res(); return; }
         if (naturalEnd) { clearInterval(iv); res(); return; }
         var t = audio.currentTime;
         if (audio.ended || t >= totalDur - 0.1) { playedToEnd = true; naturalEnd = true; clearInterval(iv); res(); return; }
@@ -3463,7 +3583,7 @@
     takeSlice();   // 收尾：不足一片的剩余音频
     stopNow = true;
     await consumerPromise;
-    if (consumerErr && !asrStop(myGen)) {
+    if (consumerErr && !asrStop(S, myGen)) {
       toast('⚠ 播放录制中途出错（' + (consumerErr.message || consumerErr) + '），已保留成功转写部分');
     }
     // 对账：只有「确实播到结尾」才纠正倍速带来的整体偏差。
@@ -3530,7 +3650,7 @@
     var out = [], BATCH = 120;
     aiTruncated = false;
     for (var i = 0; i < body.length; i += BATCH) {
-      if (asrStop(myGen)) break;
+      if (asrStop(state, myGen)) break;
       var batch = body.slice(i, i + BATCH);
       var prompt = '你是专业字幕翻译。把下面 JSON 数组里每条 content 翻译成' + targetName + '，要求：1) from/to 字段原样保留；2) 只翻译 content，不增删条目；3) 直接输出 JSON 数组，不要任何多余文字。\n' +
         JSON.stringify(batch.map(function (x) { return { from: x.from, to: x.to, content: x.content }; }));
@@ -3585,7 +3705,7 @@
       var meta = { title: state.title, author: state.up, desc: state.desc, category: state.category, tags: state.tags };
       var BATCH = 120, out = [], changeCount = 0;
       for (var i = 0; i < state.body.length; i += BATCH) {
-        if (asrStop(myGen)) break;
+        if (asrStop(state, myGen)) break;
         var batch = state.body.slice(i, i + BATCH);
         var prompt = TranscriptQuality.buildCorrectionPrompt(batch, meta, SETTINGS.customHotwords || '');
         var resp = await aiChat(prompt);
@@ -3595,7 +3715,7 @@
         state.asr.done = Math.floor(i / BATCH) + 1;
         render();
       }
-      if (asrStop(myGen)) { state.asr = null; state.loading = false; render(); return; }
+      if (asrStop(state, myGen)) { state.asr = null; state.loading = false; render(); return; }
       if (!out.length) throw new Error('纠错结果为空');
       out.__polished = true;
       out.incomplete = state.body.incomplete;
@@ -3606,7 +3726,7 @@
       notifyDone('字幕纠错完成', (state.title || '视频') + ' · 修正 ' + changeCount + ' 处');
     } catch (e) {
       log(e);
-      if (asrStop(myGen)) { state.asr = null; state.loading = false; render(); return; }
+      if (asrStop(state, myGen)) { state.asr = null; state.loading = false; render(); return; }
       state.err = 'LLM 纠错失败：' + e.message + '（已保留原字幕，未做任何改动）';
       state.asr = null; state.loading = false; render();
     }
@@ -3630,15 +3750,15 @@
   }
   function exportAiText() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    emitExport(state.title + '_AI纯文本', TranscriptQuality.bodyToAiText(activeBody() || []));
+    emitExport(viewState().title + '_AI纯文本', TranscriptQuality.bodyToAiText(activeBody() || []));
   }
   function exportAnchored() {
     if (!state.body) { toast('请先获取字幕'); return; }
-    emitExport(state.title + '_章节锚点稿', TranscriptQuality.bodyToAnchoredText(activeBody() || [], { gapSec: 300 }));
+    emitExport(viewState().title + '_章节锚点稿', TranscriptQuality.bodyToAnchoredText(activeBody() || [], { gapSec: 300 }));
   }
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
-  var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1 };
+  var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1, direct: null };
   function fmtCount(n) {
     n = Number(n) || 0;
     if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + ' 亿';
@@ -3650,10 +3770,37 @@
     var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
     return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
   }
+  // v9.17：从任意输入里认出 BV 号（支持纯 BV、完整链接、带参数分享文案）
+  function extractBvid(text) {
+    var m = String(text || '').match(/BV[0-9A-Za-z]{10}/);
+    return m ? m[0] : '';
+  }
+  function openDirect() {
+    var d = search.direct;
+    if (!d) return;
+    if (state.bvid === d.bvid) { toast('当前就是该视频，开始解析…'); getSubtitles(); return; }
+    pendingAutoBvid = d.bvid;
+    toast('正在打开 ' + d.bvid + '，到达后自动解析');
+    location.href = d.url;
+  }
   async function runSearch() {
     var keyword = (search.keyword || '').trim();
-    if (!keyword) { toast('请输入搜索关键词'); return; }
+    if (!keyword) { toast('请输入 BV 号或视频链接'); return; }
     if (search.loading) return;
+
+    // v9.17：命中 BV 号就不再走关键词搜索——直接给「打开并解析」入口。
+    // 关键词搜索保留在下面，作为没贴 BV 时的次选。
+    var bv = extractBvid(keyword);
+    if (bv) {
+      search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv };
+      search.items = [];
+      search.err = '';
+      search.loading = false;
+      render();
+      return;
+    }
+    search.direct = null;
+
     search.loading = true; search.err = ''; search.expanded = -1;
     render();
     var deps = { gx: gx, getWbiKeys: getWbiKeys, wbiQuery: wbiQuery, sleep: sleep, random: Math.random };
@@ -3724,6 +3871,11 @@
   // ===================== 主流程 =====================
   async function getSubtitles(opts) {
     if (state.loading) return;
+    // v9.17：后台已有任务在跑时不抢占，避免把正在解析的任务顶掉
+    if (jobActive && jobActive.state !== state) {
+      toast('后台正在解析：' + (jobActive.title || '另一个视频') + '，请等它完成或先取消');
+      return;
+    }
     var autoCopy = !!(opts && opts.autoCopy);   // v9.16：autoFetch 触发时，取到后自动复制到剪贴板
     var myGen = asrGen;   // v8.1.8 修复：补世代号守卫——切 P/切视频后旧流程的结果一律丢弃，不再写回 state
     state.loading = true; state.err = ''; state.noSub = false; state.asrRan = false;
@@ -3735,7 +3887,7 @@
       state.adapter = ad;
       state.subs = [];   // 必须先清：SPA 站内切视频时旧字幕列表会残留，导致「张冠李戴」
       await ad.resolve();
-      if (asrStop(myGen)) return;   // 切 P/切视频：丢弃旧 resolve 结果
+      if (asrStop(state, myGen)) return;   // 切 P/切视频：丢弃旧 resolve 结果
 
       // YouTube 明说不放（登录墙 / 年龄 / 版权 / 私有）：把官方给的原因原文报出来。
       // 必须卡在「引导用户去 AI 转写」之前——YouTube 的 getAudio 恒为 null，
@@ -3757,7 +3909,7 @@
           if (!(SETTINGS.asrEnable || SETTINGS.asrFallback)) throw e;
         }
       }
-      if (asrStop(myGen)) return;   // 切 P/切视频：旧字幕列表不落渲染
+      if (asrStop(state, myGen)) return;   // 切 P/切视频：旧字幕列表不落渲染
       // 「字幕需登录才可见」≠「没有字幕」。别把它算成无字幕再推去 AI 转写白烧额度。
       if (!state.subs.length && state.subNeedLogin) {
         state.err = '该视频字幕需登录后可见，请先登录 B 站再重试（不是无字幕，不用 AI 转写）';
@@ -3766,12 +3918,12 @@
       if (state.subs.length) {
         var lan = pickLanguage(state.subs);
         await fetchBody(lan);
-        if (asrStop(myGen)) return;   // 切 P/切视频：旧字幕正文不写回（多 P 串台根因之二）
+        if (asrStop(state, myGen)) return;   // 切 P/切视频：旧字幕正文不写回（多 P 串台根因之二）
         if (SETTINGS.translateTo !== 'none' && !sameLang(lan, SETTINGS.translateTo)) {
           state.asr = { phase: '翻译中', stage: 'transcribe', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null, t0: Date.now() };
           render();
           var t = await translateBody(state.body);
-          if (asrStop(myGen)) return;   // 切 P/切视频：旧翻译结果丢弃
+          if (asrStop(state, myGen)) return;   // 切 P/切视频：旧翻译结果丢弃
           if (t) { state.body = t; state.lan = lan + ' → ' + (LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo); }
           state.asr = null;
         }
@@ -3784,7 +3936,7 @@
       }
     } catch (e) {
       log(e);
-      if (asrStop(myGen)) return;   // 切 P/切视频：旧流程的报错不打扰新视频
+      if (asrStop(state, myGen)) return;   // 切 P/切视频：旧流程的报错不打扰新视频
       state.asr = null;   // 翻译/转写中途失败也要复位，避免界面卡在「翻译中」
       // 只给「软失败」兜底转写：结果为空、网络抖动、超时这类。
       // HTTP 4xx 是接口明确拒绝（401 Key 错 / 403 风控 / 404 没这资源），
@@ -3828,18 +3980,20 @@
    * 文本框、复制、所有导出、点击跳转全部走这里，保证「你看到的就是你拿到的」。
    */
   function activeBody() {
-    if (!state.body) return null;
-    var b = state.body;
-    if (state.searchKw) {
-      var r = SubExport.searchBody(b, state.searchKw);
+    var VS = viewState();   // v9.17：查看历史时读历史那份，否则读当前页面
+
+    if (!VS.body) return null;
+    var b = VS.body;
+    if (VS.searchKw) {
+      var r = SubExport.searchBody(b, VS.searchKw);
       // 一条都没命中就给全文：宁可多给，绝不让用户导出一个空文件
-      b = r.matched ? r.body : state.body;
+      b = r.matched ? r.body : VS.body;
     }
-    if (state.rangeFrom > 0) {
-      var cut = SubExport.bodyFrom(b, state.rangeFrom);
+    if (VS.rangeFrom > 0) {
+      var cut = SubExport.bodyFrom(b, VS.rangeFrom);
       if (cut.length) b = cut;   // 裁没了就退回不裁，同样是不给空文件
     }
-    if (state.shiftSec) b = SubExport.shiftBody(b, state.shiftSec);
+    if (VS.shiftSec) b = SubExport.shiftBody(b, VS.shiftSec);
     return b;
   }
 
@@ -3977,6 +4131,20 @@
       '.bsr-subfind .bsr-input{margin-bottom:0;flex:1;min-width:0}' +
       '.bsr-findinfo{font-size:10px;color:#7C5CBF;margin:0 0 6px;line-height:1.5}' +
       '.bsr-set{margin:8px 0 4px;font-size:12px;color:#7C5CBF;cursor:pointer;user-select:none}' +
+      '.bsr-histbar{display:flex;align-items:center;gap:8px;margin:8px 0;padding:6px 8px;border-radius:6px;background:#fff6e5;border:1px solid #f0d9a8;font-size:11px;color:#8a6d3b}' +
+      '.bsr-histbar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-hist{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto}' +
+      '.bsr-histitem{display:flex;align-items:center;gap:6px}' +
+      '.bsr-histopen{flex:1;min-width:0;text-align:left;background:#f7f7fa;border:1px solid #e3e3ea;border-radius:6px;padding:6px 8px;font-size:11px;cursor:pointer;overflow:hidden}' +
+      '.bsr-histopen:hover{background:#efeaf9;border-color:#c8b8e8}' +
+      '.bsr-histopen b{display:block;font-weight:600;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-histopen i{display:block;font-style:normal;color:#999;font-size:10px;margin-top:2px}' +
+      '.bsr-histcopy{flex:none;font-size:11px;padding:6px 8px;border:1px solid #d9d9e3;border-radius:6px;background:#fff;cursor:pointer}' +
+      '.bsr-histcopy:hover{background:#f0f0f8}' +
+      '#bsr-root[data-theme="dark"] .bsr-histopen{background:#2c2c36;border-color:#3d3d4a;color:#ddd}' +
+      '#bsr-root[data-theme="dark"] .bsr-histopen b{color:#eee}' +
+      '#bsr-root[data-theme="dark"] .bsr-histcopy{background:#2c2c36;border-color:#3d3d4a;color:#ddd}' +
+      '#bsr-root[data-theme="dark"] .bsr-histbar{background:#3a3220;border-color:#5a4a28;color:#d9c38a}' +
       '.bsr-setbox{display:none;border:1px solid #eee;border-radius:8px;padding:10px;margin-bottom:8px}' +
       '.bsr-setbox.show{display:block}' +
       '.bsr-setbox label{display:block;font-size:11px;color:#888;margin:8px 0 2px}' +
@@ -4147,6 +4315,15 @@
       '      <button class="bsr-btn bsr-asr" id="bsrUnlock" style="display:none">▶ 解锁播放并继续（浏览器自动播放限制）</button>' +
       '      <button class="bsr-btn bsr-cancel" id="bsrCancel" style="display:none">✖ 取消</button>' +
       '    </div>' +
+      '    <div class="bsr-histbar" id="bsrHistViewBar" style="display:none">' +
+      '      <span id="bsrHistViewTitle">正在查看历史结果</span>' +
+      '      <button class="bsr-btn bsr-t" id="bsrHistViewBack">↩ 返回当前视频</button>' +
+      '    </div>' +
+      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span>/5）· 点条目查看，右侧复制</div>' +
+      '    <div class="bsr-pbox" id="bsrHistoryBox" style="display:none">' +
+      '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
+      '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多 5 条）。</div>' +
+      '    </div>' +
       '    <div class="bsr-set" id="bsrAxisToggle">⏱ 时间轴（对不上就整体挪 · 只导出后半段）</div>' +
       '    <div class="bsr-pbox" id="bsrAxisBox" style="display:none">' +
       '      <div class="bsr-wrow"><label>整体偏移（秒，可负）</label><input type="number" id="bsrShift" step="0.5" placeholder="0" /></div>' +
@@ -4176,8 +4353,8 @@
       '        </select>' +
       '      </div>' +
       '      <div class="bsr-searchbar">' +
-      '        <input class="bsr-input" id="bsrSearchKw" placeholder="搜视频，如「注意力机制 科普」" />' +
-      '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">搜索</button>' +
+      '        <input class="bsr-input" id="bsrSearchKw" placeholder="粘贴 BV 号或视频链接，如 BV1xx411c7mD" />' +
+      '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">打开</button>' +
       '      </div>' +
       '      <div class="bsr-row" style="font-size:11px;color:#888;margin-bottom:4px">' +
       '        <label style="display:flex;align-items:center;gap:5px;margin:0;cursor:pointer"><input type="checkbox" id="bsrSearchNative" style="width:auto" /> 仅有字幕</label>' +
@@ -4195,12 +4372,14 @@
       '    </div>' +
       '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）</div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
-      '      <label>AI 厂商（决定 API 地址与推荐模型，可随时切换）</label>' +
+      '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
+      '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
+      '      <label>AI 厂商（决定请求发到哪家；支持转写的会标注）</label>' +
       '      <select id="bsrAiProvider">' +
-      '        <option value="siliconflow">硅基流动 SiliconFlow（推荐·有免费额度）</option>' +
-      '        <option value="openai">OpenAI</option>' +
-      '        <option value="deepseek">DeepSeek</option>' +
-      '        <option value="openrouter">OpenRouter</option>' +
+      '        <option value="siliconflow">硅基流动 SiliconFlow（支持转写 · 有免费额度）</option>' +
+      '        <option value="openai">OpenAI（支持转写）</option>' +
+      '        <option value="deepseek">DeepSeek（仅翻译，不支持转写）</option>' +
+      '        <option value="openrouter">OpenRouter（支持转写）</option>' +
       '        <option value="custom">自定义 OpenAI 兼容端点</option>' +
       '      </select>' +
       '      <div id="bsrAiBaseWrap" style="display:none">' +
@@ -4216,15 +4395,17 @@
       '      </div>' +
       '      <button type="button" class="bsr-btn bsr-s" id="bsrAiTest" style="margin:6px 0 0;width:100%">测试连接（验证 Key 是否有效，不烧额度）</button>' +
       '      <div class="bsr-inv" id="bsrInvBox">' +
-      '        <div class="bsr-inv-t">🎁 新用户福利：用 GitHub 注册「硅基流动」送 <b>¥16 代金券</b>，跑 AI 转写完全够用</div>' +
+      '        <div class="bsr-inv-t">还没有 API Key：可先在硅基流动注册，新用户有赠送额度，足够跑完一批转写。</div>' +
       '        <div class="bsr-inv-r">' +
-      '          <button type="button" class="bsr-inv-code" id="bsrInviteCopy">📋 邀请码 axOmWfWi（点击复制）</button>' +
-      '          <a class="bsr-inv-go" href="https://cloud.siliconflow.cn/i/axOmWfWi" target="_blank" rel="noopener">去注册领 ¥16 →</a>' +
+      '          <button type="button" class="bsr-inv-code" id="bsrInviteCopy">复制邀请码 axOmWfWi</button>' +
+      '          <a class="bsr-inv-go" href="https://cloud.siliconflow.cn/i/axOmWfWi" target="_blank" rel="noopener">打开注册页</a>' +
       '        </div>' +
       '      </div>' +
+      '      <div class="bsr-set">▍第二步 · 什么时候自动转写</div>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrOn" /> 无字幕时自动 AI 语音转写</label>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrFb" /> 字幕获取失败时自动转写</label>' +
       '      <label class="chk"><input type="checkbox" id="bsrAsrForce" /> 始终使用音频转写（无视自带字幕）</label>' +
+      '      <div class="bsr-set">▍转写参数（默认即可，长视频再调）</div>' +
       '      <label>转写语言（无字幕时）</label>' +
       '      <select id="bsrAsrLang">' +
       '        <option value="auto">自动识别</option>' +
@@ -4258,6 +4439,7 @@
       '        <option value="8">8 倍速（快）</option>' +
       '        <option value="16">16 倍速（极快）</option>' +
       '      </select>' +
+      '      <div class="bsr-set">▍翻译（有字幕时才会用到）</div>' +
       '      <label>翻译为（有字幕时才生效）</label>' +
       '      <select id="bsrTrans">' +
       '        <option value="none">不翻译（保留原语言）</option>' +
@@ -4280,6 +4462,7 @@
       '      <label>自定义热词（逗号分隔，叠加在自动热词上，如：蓝桥杯,STM32,寄存器）</label>' +
       '      <input type="text" id="bsrCustomHotwords" placeholder="留空则只用视频自身元数据" autocomplete="off" />' +
       '      <label class="chk"><input type="checkbox" id="bsrLlmCorrect" /> LLM 轻量纠错（付费：纠错按钮只改错字不改句式）</label>' +
+      '      <div class="bsr-set">▍其他（可全部忽略）</div>' +
       '      <label>YouTube Data API Key（搜索筛选 Tab 搜 YouTube 用，可选）</label>' +
       '      <div class="bsr-keywrap">' +
       '        <input type="password" id="bsrYtKey" placeholder="AIza..." autocomplete="off" />' +
@@ -4349,15 +4532,15 @@
     root.querySelector('#bsrGet').onclick = function () { getSubtitles(); };
     // v9.9：检索命中时只导命中行（activeBody 已处理「空关键词」与「零命中」两种兜底）
     root.querySelector('#bsrCopy').onclick = function () { copyText(state.body ? bodyToTxt(activeBody() || []) : getVideoInfoText()); };
-    root.querySelector('#bsrTxt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.txt', '\uFEFF' + bodyToTxt(activeBody() || [])); };
-    root.querySelector('#bsrSrt').onclick = function () { if (state.body) download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.srt', '\uFEFF' + bodyToSrt(activeBody() || []), 'text/plain;charset=utf-8'); };
+    root.querySelector('#bsrTxt').onclick = function () { if (viewState().body) download(safeName(viewState().title) + (viewState().totalPages > 1 ? '_P' + viewState().page : '') + '_' + viewState().lan + '.txt', '\uFEFF' + bodyToTxt(activeBody() || [])); };
+    root.querySelector('#bsrSrt').onclick = function () { if (viewState().body) download(safeName(viewState().title) + (viewState().totalPages > 1 ? '_P' + viewState().page : '') + '_' + viewState().lan + '.srt', '\uFEFF' + bodyToSrt(activeBody() || []), 'text/plain;charset=utf-8'); };
     root.querySelector('#bsrVtt').onclick = function () {
       if (!state.body) return;
       download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.vtt', '\uFEFF' + SubExport.bodyToVtt(activeBody() || []), 'text/vtt;charset=utf-8');
     };
     root.querySelector('#bsrMd').onclick = function () {
       if (!state.body) return;
-      var md = SubExport.bodyToMd(activeBody() || [], { title: state.title, up: state.up, lan: state.lan, page: state.page, totalPages: state.totalPages });
+      var md = SubExport.bodyToMd(activeBody() || [], { title: viewState().title, up: viewState().up, lan: viewState().lan, page: viewState().page, totalPages: viewState().totalPages });
       download(safeName(state.title) + (state.totalPages > 1 ? '_P' + state.page : '') + '_' + state.lan + '.md', '\uFEFF' + md, 'text/markdown;charset=utf-8');
     };
     // v9.11 时间轴校正：转写时间轴整体早/晚几秒是常态（识别按片算，误差会累积），
@@ -4427,7 +4610,12 @@
     var findClear = root.querySelector('#bsrFindClear');
     if (findClear) findClear.onclick = function () { state.searchKw = ''; render(); var fi = root.querySelector('#bsrFind'); if (fi) fi.focus(); };
     root.querySelector('#bsrLan').onchange = function (e) { switchLan(e.target.value); };
-    root.querySelector('#bsrCancel').onclick = function () { if (state.asr) state.asr.cancel = true; };
+    root.querySelector('#bsrCancel').onclick = function () {
+      // v9.17：取消要作用在「正在跑的那份状态」上——即便是已转入后台的任务
+      var VS = viewState();
+      if (VS && VS.asr) { VS.asr.cancel = true; toast('已请求中断，正在收尾…'); }
+      else if (jobActive && jobActive.state.asr) { jobActive.state.asr.cancel = true; toast('已请求中断后台任务…'); }
+    };
     root.querySelector('#bsrAsrBtn').onclick = function () { runAsr(); };
     // v9.4 断点续传的「重新开始」：清磁盘断点 + 作废当前轮次 + 重启 ASR。
     // asrGen++ 让旧轮次的每处 asrStop 陆续退场（不会污染新轮次的状态）；
@@ -4449,6 +4637,13 @@
       }).catch(function () { toast('仍被拦截，请点击页面空白处后重试'); });
     };
     root.querySelector('#bsrSetToggle').onclick = function () { root.querySelector('#bsrSetBox').classList.toggle('show'); };
+    // v9.17 历史结果：展开/收起、返回当前视频
+    root.querySelector('#bsrHistoryToggle').onclick = function () {
+      var hb = root.querySelector('#bsrHistoryBox');
+      hb.classList.toggle('show');
+      render();
+    };
+    root.querySelector('#bsrHistViewBack').onclick = function () { closeHistoryJob(); };
     root.querySelector('#bsrEye').onclick = function () {
       var k = root.querySelector('#bsrKey');
       k.type = (k.type === 'password') ? 'text' : 'password';
@@ -4585,6 +4780,8 @@
     root.querySelector('#bsrCorrect').onclick = runLlmCorrect;
     // 结果卡片：点一下直接用本脚本打开该视频（v9.16 起不再有「先展开评分理由」这一层）
     root.querySelector('#bsrSearchResults').onclick = function (e) {
+      var direct = e.target && e.target.closest ? e.target.closest('#bsrDirectCard') : null;
+      if (direct) { openDirect(); return; }
       var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
       if (!card) return;
       var i = Number(card.getAttribute('data-i'));
@@ -4647,31 +4844,33 @@
   }
 
   function render() {
+    var VS = viewState();   // v9.17：查看历史时读历史那份，否则读当前页面
+
     if (!root) return;
     var $ = function (id) { return root.querySelector(id); };
-    $('#bsrTitle').textContent = (state.totalPages > 1 ? 'P' + state.page + (state.pageTitle ? ' ' + state.pageTitle : '') + ' · ' : '') + (state.title || '—');
+    $('#bsrTitle').textContent = (VS.totalPages > 1 ? 'P' + VS.page + (VS.pageTitle ? ' ' + VS.pageTitle : '') + ' · ' : '') + (VS.title || '—');
     var btn = $('#bsrGet');
-    if (state.loading) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
+    if (VS.loading) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
     else { btn.disabled = false; btn.textContent = '⚡ 获取字幕'; }
     var st = $('#bsrStatus');
-    if (state.err) st.textContent = '⚠️ ' + state.err;
-    else if (state.loading && state.asr) st.textContent = '⏳ ' + state.asr.phase + (state.asr.total ? '（' + state.asr.done + '/' + state.asr.total + '）' : '');
-    else if (state.loading) st.textContent = '正在拉取字幕...';
+    if (VS.err) st.textContent = '⚠️ ' + VS.err;
+    else if (VS.loading && VS.asr) st.textContent = '⏳ ' + VS.asr.phase + (VS.asr.total ? '（' + VS.asr.done + '/' + VS.asr.total + '）' : '');
+    else if (VS.loading) st.textContent = '正在拉取字幕...';
     // 分站点说人话：YouTube 的 getAudio 恒为 null（音频是带签名的分片流），
     // 根本走不了 AI 转写。以前不分站点一律喊「点下方 AI 转写」，点了必然失败。
-    else if (state.noSub) st.textContent = (state.adapter && state.adapter.id === 'youtube')
+    else if (VS.noSub) st.textContent = (VS.adapter && VS.adapter.id === 'youtube')
       ? 'ℹ️ 该 YouTube 视频没有字幕轨道。YouTube 音频是带签名的分片流，本脚本取不到音频、无法 AI 转写——请换用带字幕（含官方自动字幕）的视频'
       : 'ℹ️ 本视频无字幕，点击下方「AI 转写」可语音生成字幕';
-    else if (state.body) {
-      var warn = state.body.incomplete ? ' ⚠️ 字幕可能不完整'
-        : (state.body.estTs ? ' ⚠️ 时间轴为估算（接口未返回时间戳）' : '');
-      st.textContent = '✅ ' + state.body.length + ' 句 · ' + (state.lan || '') + ' · ' + bodyToTxt(state.body).replace(/\s/g, '').length + ' 字' + warn;
+    else if (VS.body) {
+      var warn = VS.body.incomplete ? ' ⚠️ 字幕可能不完整'
+        : (VS.body.estTs ? ' ⚠️ 时间轴为估算（接口未返回时间戳）' : '');
+      st.textContent = '✅ ' + VS.body.length + ' 句 · ' + (VS.lan || '') + ' · ' + bodyToTxt(VS.body).replace(/\s/g, '').length + ' 字' + warn;
     } else st.textContent = '';
     var prog = $('#bsrProg');
     var box = $('#bsrAsrBox');
     var mini = $('#bsrMini');
-    if (state.asr) {
-      var a = state.asr;
+    if (VS.asr) {
+      var a = VS.asr;
       var totalN = a.total || 0, doneN = a.done || 0;
       // 五阶段折算成一条总进度：下载 0-20 / 读时长 20-22 / 解码或录制 22-45 / 转写 45-95 / 合并 95-100
       function stageRange(st) {
@@ -4764,46 +4963,46 @@
     // v9.4 断点续传提示行：只在「本轮是从磁盘断点继续的」时出现，附「重新开始」出口
     var resumeRow = $('#bsrResumeRow');
     if (resumeRow) {
-      var resuming = !!state.asr && !!state.asr.resumed;
+      var resuming = !!VS.asr && !!VS.asr.resumed;
       resumeRow.style.display = resuming ? 'flex' : 'none';
-      if (resuming && state.asr.resumeTip) $('#bsrResumeTip').textContent = state.asr.resumeTip;
+      if (resuming && VS.asr.resumeTip) $('#bsrResumeTip').textContent = VS.asr.resumeTip;
     }
     // v9.9 检索：文本框只显示命中行，命中数直接写在框上方（不用猜有没有筛掉东西）
     var fr = $('#bsrFindRow'), fi = $('#bsrFindInfo');
-    if (fr) fr.style.display = state.body ? 'flex' : 'none';
+    if (fr) fr.style.display = VS.body ? 'flex' : 'none';
     // v9.16.1 没字幕时连带隐藏「⏱ 时间轴」整块：没有东西可偏移/裁剪，挂着就是无意义显示
     var at = $('#bsrAxisToggle'), ab = $('#bsrAxisBox');
-    if (at) at.style.display = state.body ? '' : 'none';
-    if (ab && !state.body) ab.style.display = 'none';
+    if (at) at.style.display = VS.body ? '' : 'none';
+    if (ab && !VS.body) ab.style.display = 'none';
     if (fi) {
-      var res = state.body ? SubExport.searchBody(state.body, state.searchKw) : null;
-      if (res && state.searchKw) {
+      var res = VS.body ? SubExport.searchBody(VS.body, VS.searchKw) : null;
+      if (res && VS.searchKw) {
         var span = SubExport.spanOf(res.body);
         fi.style.display = 'block';
         fi.textContent = res.matched
           ? '命中 ' + res.matched + ' / ' + res.total + ' 条' + (span ? '（' + SubExport.fmtClock(span.from) + ' ~ ' + SubExport.fmtClock(span.to) + '）' : '') + ' · 复制与导出只出命中行'
-          : '没找到「' + state.searchKw + '」（全篇 ' + res.total + ' 条）· 复制与导出会导出全文';
+          : '没找到「' + VS.searchKw + '」（全篇 ' + res.total + ' 条）· 复制与导出会导出全文';
       } else fi.style.display = 'none';
     }
-    if ($('#bsrFind') && document.activeElement !== $('#bsrFind')) $('#bsrFind').value = state.searchKw || '';
+    if ($('#bsrFind') && document.activeElement !== $('#bsrFind')) $('#bsrFind').value = VS.searchKw || '';
     // v9.11 时间轴校正状态：写在提示行里，用户一眼知道自己开了什么（不然导出的时间戳莫名偏了）
     var si = $('#bsrShift');
-    if (si && document.activeElement !== si) si.value = state.shiftSec ? String(state.shiftSec) : '';
+    if (si && document.activeElement !== si) si.value = VS.shiftSec ? String(VS.shiftSec) : '';
     var at = $('#bsrAxisTip');
     if (at) {
       var bits = [];
-      if (state.rangeFrom > 0) bits.push('已只保留 ' + SubExport.fmtClock(state.rangeFrom) + ' 之后');
-      if (state.shiftSec) bits.push('时间轴已整体' + (state.shiftSec > 0 ? '推迟' : '提前') + ' ' + Math.abs(state.shiftSec) + ' 秒');
+      if (VS.rangeFrom > 0) bits.push('已只保留 ' + SubExport.fmtClock(VS.rangeFrom) + ' 之后');
+      if (VS.shiftSec) bits.push('时间轴已整体' + (VS.shiftSec > 0 ? '推迟' : '提前') + ' ' + Math.abs(VS.shiftSec) + ' 秒');
       at.textContent = bits.length
         ? bits.join(' · ')
         : '偏移只改导出文件里的时间戳（和点击跳转落点），不改文字；「只保留当前位置之后」会同时收窄文本框与所有导出。';
     }
     renderLines();
     var lanRow = $('#bsrLanRow'), sel = $('#bsrLan');
-    if (state.subs.length) {
+    if (VS.subs.length) {
       lanRow.style.display = 'flex';
-      sel.innerHTML = state.subs.map(function (s) {
-        return '<option value="' + escHtml(s.lan) + '"' + (s.lan === state.lan ? ' selected' : '') + '>' + escHtml(s.lan_doc || s.lan) + ' (' + escHtml(s.lan) + ')' + (s.urls.length > 1 ? ' ×' + s.urls.length + '段' : '') + (s.ai ? ' AI' : '') + '</option>';
+      sel.innerHTML = VS.subs.map(function (s) {
+        return '<option value="' + escHtml(s.lan) + '"' + (s.lan === VS.lan ? ' selected' : '') + '>' + escHtml(s.lan_doc || s.lan) + ' (' + escHtml(s.lan) + ')' + (s.urls.length > 1 ? ' ×' + s.urls.length + '段' : '') + (s.ai ? ' AI' : '') + '</option>';
       }).join('');
     } else lanRow.style.display = 'none';
     // 导出类按钮：没字幕时整排收起来。以前无条件显示，点下去什么也没发生，
@@ -4813,15 +5012,15 @@
     var exportIds = ['#bsrCopy', '#bsrTxt', '#bsrSrt', '#bsrAiTxt', '#bsrAnchor', '#bsrVtt', '#bsrMd'];
     for (var ei = 0; ei < exportIds.length; ei++) {
       var eb = $(exportIds[ei]);
-      if (eb) eb.style.display = state.body ? '' : 'none';
+      if (eb) eb.style.display = VS.body ? '' : 'none';
     }
-    $('#bsrCancel').style.display = (state.asr && !state.err) ? 'inline-block' : 'none';
+    $('#bsrCancel').style.display = (VS.asr && !VS.err) ? 'inline-block' : 'none';
     // 无字幕时显示「AI 转写」按钮
-    $('#bsrAsrBtn').style.display = (state.noSub || (!state.subs.length && !state.loading && !state.body)) ? 'inline-block' : 'none';
+    $('#bsrAsrBtn').style.display = (VS.noSub || (!VS.subs.length && !VS.loading && !VS.body)) ? 'inline-block' : 'none';
     // 播放录制被自动播放策略拦截时显示「解锁」按钮
-    $('#bsrUnlock').style.display = (state.asr && state.asr.unlock) ? 'inline-block' : 'none';
+    $('#bsrUnlock').style.display = (VS.asr && VS.asr.unlock) ? 'inline-block' : 'none';
     // v9.2 LLM 纠错按钮：付费功能，仅在设置开启 + 有 Key + 有字幕时出现，不打扰默认用户
-    $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.aiKey && state.body && !state.loading) ? 'inline-block' : 'none';
+    $('#bsrCorrect').style.display = (SETTINGS.llmCorrect && SETTINGS.aiKey && VS.body && !VS.loading) ? 'inline-block' : 'none';
     // v9.2 搜索面板渲染。签名缓存：只有搜索状态真变了才重写列表，
     // 否则每帧 render 都会重建 DOM，刚渲染好的卡片被白刷一遍。
     var sst = $('#bsrSearchStatus');
@@ -4833,7 +5032,15 @@
     if (sig !== render._searchSig) {
       render._searchSig = sig;
       var sbox = $('#bsrSearchResults');
-      if (!search.items.length && !search.loading) {
+      if (search.direct) {
+        // v9.17：贴了 BV 号 —— 给一张直取卡片，不再列一堆搜索结果
+        var d = search.direct;
+        var here = (state.bvid === d.bvid);
+        sbox.innerHTML = '<div class="bsr-res" id="bsrDirectCard" title="' + (here ? '点击立即解析' : '点击打开该视频并自动解析') + '">' +
+          '<div class="bsr-res-t"><span>BV ' + escHtml(d.bvid) + '</span></div>' +
+          '<div class="bsr-res-m">' + (here ? '当前就是该视频 · 点击立即解析' : '点击打开该视频 · 自动开始解析字幕') + '</div>' +
+          '</div>';
+      } else if (!search.items.length && !search.loading) {
         sbox.innerHTML = '<div class="bsr-empty">输入关键词搜视频<br/>自动探测有没有字幕，标出「有字幕 / 无字幕·需转写」<br/>点卡片直接用本脚本打开提取 · B站免 Key · YouTube 需 Data API Key（⚙ 设置）</div>';
       } else {
         sbox.innerHTML = search.items.map(function (item, i) {
@@ -4847,6 +5054,91 @@
         }).join('');
       }
     }
+    syncHistoryUI($);   // v9.17：历史结果面板
+  }
+
+  // ===================== v9.17 历史结果面板 =====================
+  function syncHistoryUI($) {
+    var toggle = $('#bsrHistoryToggle');
+    var box = $('#bsrHistoryBox');
+    if (!toggle) return;
+    if (jobHistory.length) {
+      toggle.style.display = 'block';
+      var c = $('#bsrHistoryCount');
+      if (c) c.textContent = jobHistory.length;
+    } else {
+      toggle.style.display = 'none';
+      if (box) box.classList.remove('show');
+    }
+    var bar = $('#bsrHistViewBar');
+    if (bar) {
+      var h = viewingJobId ? findJob(viewingJobId) : null;
+      var back = $('#bsrHistViewBack');
+      if (h) {
+        bar.style.display = 'flex';
+        $('#bsrHistViewTitle').textContent = '只读查看：' + (h.title || h.bvid || '历史结果');
+        if (back) back.style.display = '';
+      } else if (jobActive && jobActive.state && jobActive.state.detached) {
+        // 用户在别的视频页面，后台任务仍在跑：给一条常驻提示，避免「以为丢了」
+        var s2 = jobActive.state.asr;
+        var pct2 = s2 && isFinite(s2.progress) ? ' · ' + Math.round(s2.progress) + '%' : '';
+        bar.style.display = 'flex';
+        $('#bsrHistViewTitle').textContent = '后台解析中：' + (jobActive.title || '另一个视频') + pct2;
+        if (back) back.style.display = 'none';
+      } else {
+        bar.style.display = 'none';
+        if (back) back.style.display = '';
+      }
+    }
+    if (box && box.classList.contains('show')) renderHistoryList();
+  }
+
+  function renderHistoryList() {
+    var host = root && root.querySelector('#bsrHistoryList');
+    if (!host) return;
+    var oldTop = host.scrollTop;   // 重建时保留滚动位置，避免每次 render 跳回顶部
+    host.innerHTML = '';
+    jobHistory.forEach(function (h) {
+      var item = document.createElement('div');
+      item.className = 'bsr-histitem';
+      var open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'bsr-histopen';
+      var b = document.createElement('b');
+      b.textContent = (h.page > 1 ? 'P' + h.page + ' ' : '') + (h.title || h.bvid || '未命名视频');
+      var i = document.createElement('i');
+      i.textContent = (h.source === 'asr' ? 'AI 转写' : '字幕') + ' · '
+        + ((h.body && h.body.length) ? h.body.length + ' 句' : '')
+        + ' · ' + new Date(h.createdAt).toLocaleTimeString()
+        + (h.incomplete ? ' · 不完整' : '');
+      open.appendChild(b);
+      open.appendChild(i);
+      open.onclick = function () { openHistoryJob(h.id); };
+      var cp = document.createElement('button');
+      cp.type = 'button';
+      cp.className = 'bsr-histcopy';
+      cp.textContent = '📋';
+      cp.title = '复制这条字幕全文';
+      cp.onclick = function () {
+        copyText(bodyToTxt(h.body || []));
+        toast('已复制：' + (h.title || '历史结果'));
+      };
+      item.appendChild(open);
+      item.appendChild(cp);
+      host.appendChild(item);
+    });
+    host.scrollTop = oldTop;
+  }
+
+  function openHistoryJob(id) {
+    if (!findJob(id)) return;
+    viewingJobId = id;
+    render();
+  }
+
+  function closeHistoryJob() {
+    viewingJobId = 0;
+    render();
   }
 
   async function switchLan(lan) {
@@ -4854,19 +5146,19 @@
     state.loading = true; render();
     try {
       await fetchBody(lan);
-      if (asrStop(myGen)) return;   // 切视频：丢弃旧字幕结果
+      if (asrStop(state, myGen)) return;   // 切视频：丢弃旧字幕结果
       if (SETTINGS.translateTo !== 'none' && !sameLang(lan, SETTINGS.translateTo)) {
         state.asr = { phase: '翻译中', stage: 'transcribe', done: 0, total: Math.max(1, Math.ceil(state.body.length / 120)), cancel: false, progress: null, t0: Date.now() };
         render();
         var t = await translateBody(state.body);
-        if (asrStop(myGen)) return;   // 切视频：丢弃旧翻译结果
+        if (asrStop(state, myGen)) return;   // 切视频：丢弃旧翻译结果
         if (t) { state.body = t; state.lan = lan + ' → ' + (LANG_NAMES[SETTINGS.translateTo] || SETTINGS.translateTo); }
         state.asr = null;
       }
-      if (asrStop(myGen)) return;
+      if (asrStop(state, myGen)) return;
       state.loading = false; render();
     } catch (e) {
-      log(e); if (!asrStop(myGen)) { state.err = '切换语言失败：' + e.message; state.loading = false; render(); }
+      log(e); if (!asrStop(state, myGen)) { state.err = '切换语言失败：' + e.message; state.loading = false; render(); }
     }
   }
 
@@ -4898,9 +5190,17 @@
   }
 
   function resetForNewVideo() {
-    asrGen++;   // 使旧 ASR/翻译任务全部进入 stale：SPA 切视频后旧结果一律丢弃，不污染新视频
-    if (state.asr) state.asr.cancel = true;
-    cleanupAudio();
+    // v9.17：正在跑任务时切视频 ≠ 取消。任务转后台继续，结果跑完自动进历史。
+    // 只有「没有任务在跑」时才递增世代号，作废页面上残留的请求。
+    if (jobActive && jobActive.state) {
+      jobActive.state.detached = true;
+      log('切视频：解析任务转入后台，继续执行');
+    } else {
+      asrGen++;   // 使旧 ASR/翻译任务全部进入 stale：SPA 切视频后旧结果一律丢弃，不污染新视频
+      if (state.asr) state.asr.cancel = true;
+    }
+    cleanupAudio(state);
+    search.direct = null;   // v9.18：换视频后清掉上一张 BV 直取卡片，避免误点
     state.adapter = null; state.cid = null; state.videoId = '';
     state.subs = []; state.body = null; state.lan = ''; state.err = ''; state.noSub = false; state.loading = false; state.asr = null; state.asrRan = false;
     // v9.11：换视频必须清掉检索词与时间轴校正——留着会把上一条视频的筛选套到新视频上，
@@ -4940,6 +5240,12 @@
     }
     var switchingPage = RouteIdentity.isSameVideoFamily(prevHref, nextHref);
     resetForNewVideo();
+    // v9.17：BV 直取卡片跳过来 —— 到达目标视频后自动开始解析
+    if (pendingAutoBvid && extractBvid(nextHref) === pendingAutoBvid) {
+      pendingAutoBvid = '';
+      setTimeout(function () { if (!state.loading) getSubtitles(); }, 600);
+      return;
+    }
     if (switchingPage && SETTINGS.autoFetchOnPageSwitch) {
       log('检测到换 P（P' + RouteIdentity.pageOf(nextHref) + '），自动重新获取字幕');
       setTimeout(function () { if (state.adapter && !state.loading) getSubtitles(); }, 400);

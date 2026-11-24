@@ -16,7 +16,7 @@
 </p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.21.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.21.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -49,7 +49,7 @@
   <img src="assets/shot-search.png" width="300" alt="贴一个 BV 号，不跳页直接取回字幕；多 P 合集会列出每个分 P，逐个取、逐个复制">
 </p>
 
-<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ BV 直取：贴 BV 号或链接，不跳页直接远程取回字幕；多 P 合集逐 P 提取、逐 P 复制</sub></p>
+<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ BV 直取：贴 BV 号或链接，不跳页直接远程取回字幕；多 P 合集逐 P 提取，点哪一行就复制哪个 P（标题 + 链接，取过字幕后连正文一起复制）</sub></p>
 
 ---
 
@@ -196,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.21.0 · 用例 86）
+结果：全部一致（版本 9.21.1 · 用例 86）
 ```
 
 ---

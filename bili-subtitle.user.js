@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.21.0
+// @version      9.21.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -3791,7 +3791,7 @@
   function openDirect() {
     var d = search.direct;
     if (!d) return;
-    if (d.multi) return;   // 多 P：用列表里每一行的「取字幕」，点标题卡不做整段重抓
+    if (d.multi) { toast('点列表里任意一行，复制该 P 的标题与链接'); return; }   // 多 P：用列表行
     if (d.jump) { pendingAutoBvid = d.bvid; toast('正在打开 ' + d.bvid + '，到达后自动解析'); location.href = d.url; return; }
     if (state.bvid === d.bvid) { toast('当前就是该视频，开始解析…'); getSubtitles(); return; }
     remoteGrab(d.bvid);
@@ -4140,9 +4140,9 @@
       navigator.clipboard.writeText(code).then(function () { toast('邀请码已复制：' + code); }, function () { fallbackCopy(code, function () { toast('邀请码已复制：' + code); }); });
     } else fallbackCopy(code, function () { toast('邀请码已复制：' + code); });
   }
-  function copyText(txt) {
+  function copyText(txt, silent) {
     if (!txt) return;
-    var done = function () { toast('已复制 ' + txt.replace(/\s/g, '').length + ' 字'); };
+    var done = silent ? function () {} : function () { toast('已复制 ' + txt.replace(/\s/g, '').length + ' 字'); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(txt).then(done, function () { fallbackCopy(txt, done); });
     } else fallbackCopy(txt, done);
@@ -4317,7 +4317,8 @@
       '.bsr-empty{font-size:11px;color:#aaa;text-align:center;padding:18px 0;line-height:1.7}' +
       // v9.21 多 P 列表：一次只取一个，行数不设上限，超出滚动
       '.bsr-partlist{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow:auto;margin-top:6px;padding-right:2px}' +
-      '.bsr-part{display:flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #ececf3;border-radius:7px;background:#fff}' +
+      '.bsr-part{display:flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #ececf3;border-radius:7px;background:#fff;cursor:pointer}' +
+      '.bsr-part:hover{border-color:#f3c2d3;background:#fffafc}' +
       '.bsr-part .no{flex:none;font-size:10px;font-weight:700;color:#e2568b;min-width:22px}' +
       '.bsr-part .tt{flex:1;min-width:0;font-size:11px;color:#444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.bsr-part .du{flex:none;font-size:10px;color:#a0a0aa;font-variant-numeric:tabular-nums}' +
@@ -4547,7 +4548,7 @@
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）</div>' +
+      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.1</span></div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
       '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
       '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
@@ -4967,7 +4968,7 @@
         if (pb.getAttribute('data-done') === '1') {
           // 已取过：直接复制这一 P 的字幕，不用再点进历史
           var hj = findJob(search.partDone[pn]);
-          if (hj && hj.body) { copyText(bodyToTxt(hj.body)); toast('已复制 P' + pn + ' 字幕 · ' + (hj.pageTitle || hj.title)); }
+          if (hj && hj.body) { copyText(bodyToTxt(hj.body), true); toast('已复制 P' + pn + ' 字幕 · ' + (hj.pageTitle || hj.title)); }
           return;
         }
         var pg = null;
@@ -4977,7 +4978,31 @@
         if (pg) grabPart(md.bvid, pg, { title: md.title, up: md.up, total: md.total });
         return;
       }
-      if (t && t.closest && t.closest('.bsr-multi-head')) return;
+      // v9.21.1：整行可点。未取字幕时复制「P 号 + 标题 + 链接」，取过之后复制「标题 + 字幕正文」。
+      var row = t && t.closest ? t.closest('.bsr-part') : null;
+      if (row && !pb) {
+        var rmd = search.direct;
+        if (!rmd || !rmd.multi) return;
+        var rpn = Number(row.getAttribute('data-page'));
+        var rpg = null;
+        for (var rk = 0; rk < search.parts.length; rk++) {
+          if (Number(search.parts[rk].page) === rpn) { rpg = search.parts[rk]; break; }
+        }
+        if (rpg) {
+          var rid = search.partDone[rpn];
+          var rhj = rid ? findJob(rid) : null;
+          var rurl = 'https://www.bilibili.com/video/' + rmd.bvid + '?p=' + rpn;
+          if (rhj && rhj.body) {
+            copyText('P' + rpn + ' ' + (rpg.part || '') + '\n' + rurl + '\n\n' + bodyToTxt(rhj.body), true);
+            toast('已复制 P' + rpn + ' 标题 + 字幕（' + rhj.body.length + ' 句）');
+          } else {
+            copyText('P' + rpn + ' ' + (rpg.part || '') + '\n' + rurl, true);
+            toast('已复制 P' + rpn + ' 标题 + 链接');
+          }
+          return;
+        }
+      }
+      if (t && t.closest && t.closest('.bsr-multi-head')) { toast('点下面任意一行，复制该 P 的标题与链接'); return; }
       var direct = e.target && e.target.closest ? e.target.closest('#bsrDirectCard') : null;
       if (direct) { openDirect(); return; }
       var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
@@ -5247,7 +5272,7 @@
             var bad = search.partErr[p.page];
             var busy = search.partBusy === p.page;
             var done = !!search.partDone[p.page];
-            return '<div class="bsr-part' + (bad ? ' bad' : '') + (done ? ' done' : '') + '">' +
+            return '<div class="bsr-part' + (bad ? ' bad' : '') + (done ? ' done' : '') + '" data-page="' + p.page + '" title="点这一行：复制 P' + p.page + ' 的标题与链接">' +
               '<span class="no">P' + p.page + '</span>' +
               '<span class="tt" title="' + escHtml(p.part || '') + '">' + escHtml(p.part || ('P' + p.page)) + '</span>' +
               '<span class="du">' + fmtDurSec(Number(p.duration) || 0) + '</span>' +

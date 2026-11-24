@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.19.0
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；v9.18 新增「解析结果留存」：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索框改为 BV 号/链接直取，识别后一键打开并自动解析；设置面板按步骤分组并标注各厂商是否支持转写。
+// @version      9.20.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页）；设置面板按步骤分组并标注各厂商是否支持转写。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -2582,7 +2582,7 @@
       // 官方只提供 SenseVoiceSmall，Large 从来不存在——填了就是 404，别再给用户选
       asrModels: ['FunAudioLLM/SenseVoiceSmall'],
       chatModels: ['Qwen/Qwen2.5-72B-Instruct', 'Qwen/Qwen2.5-7B-Instruct', 'deepseek-ai/DeepSeek-V3', 'moonshotai/Kimi-K2-Instruct'],
-      freeNote: 'GitHub 注册送 ¥16 代金券（邀请码 axOmWfWi）'
+      freeNote: '新用户有赠送额度，够跑完一批转写'
     },
     openai: {
       label: 'OpenAI',
@@ -3778,18 +3778,99 @@
   function openDirect() {
     var d = search.direct;
     if (!d) return;
+    if (d.jump) { pendingAutoBvid = d.bvid; toast('正在打开 ' + d.bvid + '，到达后自动解析'); location.href = d.url; return; }
     if (state.bvid === d.bvid) { toast('当前就是该视频，开始解析…'); getSubtitles(); return; }
-    pendingAutoBvid = d.bvid;
-    toast('正在打开 ' + d.bvid + '，到达后自动解析');
-    location.href = d.url;
+    remoteGrab(d.bvid);
+  }
+
+  // v9.20 远程直取：不离开当前页，直接走接口把字幕取回来存进历史结果。
+  // 只有拿不到时才退化成「打开视频页」——搜索页该有的样子。
+  var remoteBusy = false;
+  async function remoteGrab(bv) {
+    if (remoteBusy) { toast('正在远程获取，请稍候'); return; }
+    remoteBusy = true;
+    search.loading = true;
+    search.items = [];
+    search.err = '';
+    search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv };
+    render();
+    var ref = 'https://www.bilibili.com/';
+    try {
+      var pl = JSON.parse(await gx('https://api.bilibili.com/x/player/pagelist?bvid=' + bv, { timeout: 8000, retries: 1, referer: ref }));
+      if (pl.code !== 0 || !pl.data || !pl.data.length) throw new Error('视频不存在、已删除，或 BV 号有误');
+      var pg = pl.data[0];
+      var vd = JSON.parse(await gx('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, { timeout: 8000, retries: 1, referer: ref }));
+      var vdd = (vd.code === 0 && vd.data) ? vd.data : {};
+      var title = vdd.title || pg.part || bv;
+      var up = (vdd.owner && vdd.owner.name) || '';
+      var dur = Number(vdd.duration || pg.duration) || 0;
+
+      await getWbiKeys();
+      var d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + wbiQuery({ cid: pg.cid, bvid: bv, isGaiaAvoided: true }), { timeout: 10000, retries: 1, referer: ref }));
+      if (d.code !== 0) {
+        await getWbiKeys(true);
+        d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + wbiQuery({ cid: pg.cid, bvid: bv, isGaiaAvoided: true }), { timeout: 10000, retries: 1, referer: ref }));
+      }
+      if (d.code === -101) throw new Error('该视频字幕需要登录 B 站后才能读取');
+      if (d.code !== 0) throw new Error('字幕接口返回 ' + d.code);
+
+      var root = (d.data && d.data.subtitle) || {};
+      var list = (root.subtitles || []).filter(function (s) { return s && s.subtitle_url; });
+      if (!list.length) {
+        search.err = '这个视频没有现成字幕。点下方卡片打开视频页，再用「🎙 AI 转写」。';
+        search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
+        return;
+      }
+      var cand = list.map(function (s) {
+        var u = s.subtitle_url;
+        return { lan: s.lan || '', lan_doc: s.lan_doc || s.lan || '', ai: /^ai-|^asr-/i.test(s.lan || ''), url: u.indexOf('http') === 0 ? u : 'https:' + u };
+      }).sort(function (a, b) { return langScore(a) - langScore(b); });
+      var pick = cand[0];
+      var raw = JSON.parse(await gx(pick.url, { timeout: 30000, retries: 1, referer: ref }));
+      var body = mergeBodies([raw]);
+      if (!body || !body.length) throw new Error('字幕内容为空');
+      body.incomplete = checkIntegrity(body, dur);
+      body = maybePolish(body);
+
+      var id = newJobId();
+      pushHistory({ id: id, bvid: bv, url: 'https://www.bilibili.com/video/' + bv, title: title, up: up,
+        lan: pick.lan_doc || pick.lan, body: body, createdAt: Date.now(), source: '远程直取',
+        page: 1, totalPages: pl.data.length });
+      search.direct = null;
+      search.err = '';
+      viewingJobId = id;
+      // 远程直取成功后回到「字幕提取」页，直接看到取回的内容
+      var tabSub = document.querySelector('#bsr-root .bsr-tab[data-tab="sub"]');
+      if (tabSub) tabSub.click();
+      toast('已远程取到字幕：' + title + ' · 可在右侧复制或导出');
+    } catch (e) {
+      log('远程直取失败', e);
+      search.err = '远程取不到：' + ((e && e.message) || '网络异常') + '。可点下方卡片打开视频页再取。';
+      search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
+    } finally {
+      remoteBusy = false;
+      search.loading = false;
+      render();
+    }
   }
   async function runSearch() {
     var keyword = (search.keyword || '').trim();
     if (!keyword) { toast('请输入 BV 号或视频链接'); return; }
     if (search.loading) return;
 
-    // v9.17：命中 BV 号就不再走关键词搜索——直接给「打开并解析」入口。
-    // 关键词搜索保留在下面，作为没贴 BV 时的次选。
+    // v9.20：搜索页只做 BV / 链接直取，识别不到就明确拒绝，不再偷偷落回关键词搜索。
+    var bv0 = extractBvid(keyword);
+    if (!bv0) {
+      search.direct = null;
+      search.items = [];
+      search.err = '只支持 BV 号或视频链接，例如 BV1xx411c7mD 或 https://www.bilibili.com/video/BV…';
+      search.loading = false;
+      render();
+      return;
+    }
+    return remoteGrab(bv0);
+
+    // —— 以下是 v9.17 的关键词搜索实现，v9.20 起搜索页不再暴露入口，先保留以备恢复 ——
     var bv = extractBvid(keyword);
     if (bv) {
       search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv };
@@ -4263,6 +4344,28 @@
       '#bsr-root[data-theme="dark"] .bsr-ops .bsr-c:hover,#bsr-root[data-theme="dark"] .bsr-ops .bsr-t:hover,#bsr-root[data-theme="dark"] .bsr-ops .bsr-s:hover{background:#2e2e37;border-color:#45454f}' +
       '#bsr-root[data-theme="dark"] .bsr-ops .bsr-cancel{background:#3a2224;color:#ff9a9a;border-color:#4a2b2e}' +
       '#bsr-root[data-theme="dark"] #bsrCopy{background:linear-gradient(135deg,#FB7299,#FF6B9D);color:#fff;border-color:transparent}' +
+      // v9.20 搜索页只留「BV 直取」一件事：标题 + 说明，去掉关键词搜索那套筛选
+      '.bsr-bv-head{font-size:12px;font-weight:700;color:#2b2b33;margin:2px 0 8px}' +
+      '.bsr-bv-tip{font-size:11px;line-height:1.7;color:#8b8b95;margin:9px 2px 10px}' +
+      '#bsr-root[data-theme="dark"] .bsr-bv-head{color:#e8e8f0}' +
+      '#bsr-root[data-theme="dark"] .bsr-bv-tip{color:#8f8f9c}' +
+      // v9.20 设置页降噪：邀请码从「福袋」改回一条安静的说明；测试连接不再用刺眼的蓝色块
+      '.bsr-inv{margin:10px 0 4px;padding:9px 10px;background:#f7f7fb;border:1px solid #ececf3;border-radius:8px;font-size:11px;line-height:1.65}' +
+      '.bsr-inv-t{color:#6b6b78;margin-bottom:7px}' +
+      '.bsr-inv-t b{color:#3f3f49}' +
+      '.bsr-inv-code{background:#fff;color:#3f3f49;border:1px solid #e0e0ea;font-weight:600}' +
+      '.bsr-inv-code:hover{background:#f1f1f8;border-color:#d3d3e2}' +
+      '.bsr-inv-go{background:transparent;color:#7C5CBF;padding:5px 2px;text-decoration:underline;text-underline-offset:2px}' +
+      '.bsr-inv-go:hover{background:transparent;color:#6247a0}' +
+      '#bsrSearchBtn{background:linear-gradient(135deg,#FB7299,#FF6B9D);border:none;color:#fff;font-weight:700;box-shadow:0 2px 10px rgba(251,114,153,.28)}' +
+      '#bsrSearchBtn:hover{filter:brightness(1.06)}' +
+      '#bsrAiTest{background:#f5f5f9;color:#3f3f49;border:1px solid #e8e8f0;font-weight:600}' +
+      '#bsrAiTest:hover{background:#ececf5;border-color:#d9d9e6;filter:none}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv{background:#22222a;border-color:#33333d}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv-t{color:#a0a0ac}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv-t b{color:#e4e4ec}' +
+      '#bsr-root[data-theme="dark"] .bsr-inv-code{background:#2c2c35;color:#e4e4ec;border-color:#3c3c48}' +
+      '#bsr-root[data-theme="dark"] #bsrAiTest{background:#26262d;color:#cfcfd8;border-color:#35353f}' +
       '#bsr-root button:focus-visible,#bsr-root select:focus-visible,#bsr-root input:focus-visible,#bsr-root textarea:focus-visible{outline:2px solid #7C5CBF;outline-offset:1px}' +
       '.bsr-h .th{cursor:pointer;opacity:.9;font-size:13px;user-select:none}' +
       '.bsr-h .th:hover{opacity:1;transform:scale(1.12)}' +
@@ -4281,7 +4384,7 @@
       '  <div class="bsr-h">📝 字幕提取 <span class="th" id="bsrThemeBtn" style="margin-left:auto" title="切换深色 / 浅色">🌙</span> <span class="x" id="bsrClose" style="margin-left:8px" title="收起面板">✕</span></div>' +
       '  <div class="bsr-tabs">' +
       '    <div class="bsr-tab on" data-tab="sub">📝 字幕提取</div>' +
-      '    <div class="bsr-tab" data-tab="search">🔍 搜索筛选</div>' +
+      '    <div class="bsr-tab" data-tab="search">🔗 BV 直取</div>' +
       '  </div>' +
       '  <div class="bsr-b">' +
       '    <div class="bsr-pane show" id="bsrPaneSub">' +
@@ -4354,32 +4457,16 @@
       '    </div>' +
       '    </div>' +
       '    <div class="bsr-pane" id="bsrPaneSearch">' +
-      '      <div class="bsr-row">' +
-      '        <select class="bsr-sel" id="bsrSearchPlatform" style="max-width:96px">' +
-      '          <option value="bilibili">B站</option>' +
-      '          <option value="youtube">YouTube</option>' +
-      '        </select>' +
-      '        <select class="bsr-sel" id="bsrSearchOrder" style="max-width:110px">' +
-      '          <option value="totalrank">综合排序</option>' +
-      '          <option value="click">最多播放</option>' +
-      '          <option value="pubdate">最新发布</option>' +
-      '          <option value="stow">最多收藏</option>' +
-      '        </select>' +
-      '      </div>' +
+      '      <div class="bsr-bv-head">粘贴 BV 号或视频链接，直接取字幕</div>' +
       '      <div class="bsr-searchbar">' +
-      '        <input class="bsr-input" id="bsrSearchKw" placeholder="粘贴 BV 号或视频链接，如 BV1xx411c7mD" />' +
-      '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">打开</button>' +
+      '        <input class="bsr-input" id="bsrSearchKw" placeholder="BV1xx411c7mD 或视频链接" />' +
+      '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">获取</button>' +
       '      </div>' +
-      '      <div class="bsr-row" style="font-size:11px;color:#888;margin-bottom:4px">' +
-      '        <label style="display:flex;align-items:center;gap:5px;margin:0;cursor:pointer"><input type="checkbox" id="bsrSearchNative" style="width:auto" /> 仅有字幕</label>' +
-      '        <label style="display:flex;align-items:center;gap:5px;margin:0 0 0 auto;cursor:pointer">最低播放' +
-      '          <select id="bsrSearchMinPlay" style="border:1px solid #eee;border-radius:6px;font-size:11px;padding:2px 4px">' +
-      '            <option value="0">不限</option>' +
-      '            <option value="10000">1 万</option>' +
-      '            <option value="100000">10 万</option>' +
-      '            <option value="1000000">100 万</option>' +
-      '          </select>' +
-      '        </label>' +
+      '      <div class="bsr-bv-tip">不用打开视频页：直接连 B 站接口把字幕取回来，取到后进「🗂 历史结果」查看、复制、导出。没有现成字幕时，会给你一个跳转入口去用 AI 转写。</div>' +
+      '      <div style="display:none">' +
+      '        <select id="bsrSearchPlatform"><option value="bilibili">B站</option><option value="youtube">YouTube</option></select>' +
+      '        <select id="bsrSearchOrder"><option value="totalrank">综合</option></select>' +
+      '        <input type="checkbox" id="bsrSearchNative" /><select id="bsrSearchMinPlay"><option value="0">0</option></select>' +
       '      </div>' +
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
@@ -4842,13 +4929,14 @@
   function renderLines() {
     var box = root.querySelector('#bsrOut');
     if (!box) return;
-    if (!state.body) {
-      box.innerHTML = state.noSub ? '<span class="bsr-ph">' + escHtml(getVideoInfoText()) + '</span>' : '<span class="bsr-ph">点击「获取字幕」后，字幕将显示在这里</span>';
+    var VS = viewState();   // 查看历史时读历史那份，否则读当前页面
+    if (!VS || !VS.body) {
+      box.innerHTML = (VS && VS.noSub) ? '<span class="bsr-ph">' + escHtml(getVideoInfoText()) + '</span>' : '<span class="bsr-ph">点击「获取字幕」后，字幕将显示在这里</span>';
       return;
     }
     var body = activeBody() || [];
     box.innerHTML = body.map(function (item) {
-      var hit = state.searchKw ? SubExport.searchBody([item], state.searchKw).matched : false;
+      var hit = VS.searchKw ? SubExport.searchBody([item], VS.searchKw).matched : false;
       return '<div class="bsr-line' + (hit ? ' hit' : '') + '" data-from="' + (item.from || 0) + '">' +
         '<span class="bsr-ts">' + SubExport.fmtClock(item.from || 0) + '</span>' +
         // v9.16.1 修：全脚本字幕行的正文字段统一是 content（20+ 处构造点都是它）。
@@ -5050,12 +5138,15 @@
         // v9.17：贴了 BV 号 —— 给一张直取卡片，不再列一堆搜索结果
         var d = search.direct;
         var here = (state.bvid === d.bvid);
-        sbox.innerHTML = '<div class="bsr-res" id="bsrDirectCard" title="' + (here ? '点击立即解析' : '点击打开该视频并自动解析') + '">' +
+        var jump = !here && d.jump;
+        var tip = here ? '当前就是该视频 · 点击立即解析'
+          : (jump ? '远程取不到 · 点击打开视频页再取' : '点击从 B 站接口直接取回字幕（不跳页）');
+        sbox.innerHTML = '<div class="bsr-res" id="bsrDirectCard" title="' + escHtml(tip) + '">' +
           '<div class="bsr-res-t"><span>' + escHtml(d.bvid) + '</span></div>' +
-          '<div class="bsr-res-m">' + (here ? '当前就是该视频 · 点击立即解析' : '点击打开该视频 · 自动开始解析字幕') + '</div>' +
+          '<div class="bsr-res-m">' + escHtml(tip) + '</div>' +
           '</div>';
       } else if (!search.items.length && !search.loading) {
-        sbox.innerHTML = '<div class="bsr-empty">输入关键词搜视频<br/>自动探测有没有字幕，标出「有字幕 / 无字幕·需转写」<br/>点卡片直接用本脚本打开提取 · B站免 Key · YouTube 需 Data API Key（⚙ 设置）</div>';
+        sbox.innerHTML = '<div class="bsr-empty">把 BV 号或视频链接贴到上面，点「获取」<br/>不跳页，直接连 B 站接口取回字幕，取到后存进「🗂 历史结果」<br/>没有现成字幕时会给出跳转入口，用 AI 转写</div>';
       } else {
         sbox.innerHTML = search.items.map(function (item, i) {
           var subBadge = item.hasNativeSubtitle === true ? '<span class="bsr-sub yes">有字幕</span>'

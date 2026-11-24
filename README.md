@@ -16,7 +16,7 @@
 </p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.19.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.20.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -46,10 +46,10 @@
 
 <p align="center">
   <img src="assets/shot-dark.png" width="300" alt="深色模式下的字幕面板">
-  <img src="assets/shot-search.png" width="300" alt="粘贴 BV 号后生成的直取卡片">
+  <img src="assets/shot-search.png" width="300" alt="贴一个 BV 号，不跳页直接取回字幕并渲染成可复制列表">
 </p>
 
-<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ 搜索页：贴 BV 号或链接，直接生成「打开并自动解析」卡片</sub></p>
+<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ BV 直取：贴 BV 号或链接，不跳页直接远程取回字幕</sub></p>
 
 ---
 
@@ -196,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.19.0 · 用例 86）
+结果：全部一致（版本 9.20.0 · 用例 86）
 ```
 
 ---
@@ -271,8 +271,8 @@ PASS 89 条（全部通过）
 | 认领表 | `modules/site-match.js` | 站点与页面形态识别 + 视频号抽取与消毒 |
 | 路由身份 | `modules/route-identity.js` | 判断「有没有换视频」，锚点不误伤 |
 | 断点续传 | `modules/seg-resume.js` | 批次完成落盘、加载、清理，24h TTL |
-| 候选评分 | `modules/candidate-scorer.js` | 搜索结果排序（有字幕优先） |
-| 搜索筛选 | `modules/search-filter.js` | B 站 wbi 搜索 / YouTube Data API |
+| 候选评分 | `modules/candidate-scorer.js` | 候选排序（有字幕优先），BV 直取复用同一套打分 |
+| 搜索筛选 | `modules/search-filter.js` | B 站 wbi 搜索 / YouTube Data API（面板入口已收进 BV 直取，模块级保留） |
 | 质量三层 | `modules/transcript-quality.js` | 标点恢复、断句合并、去重 |
 | 导出 | `modules/sub-export.js` | TXT / SRT / VTT / MD 与检索过滤后的导出范围 |
 
@@ -359,7 +359,7 @@ myvendor: {
 - ✅ v9.0 分段解码 · v9.4 分段断点续传 · v9.6 锚点不误伤 · v9.7 深色模式
 - ✅ v9.8 认领表 · v9.9 字幕内检索 + VTT/MD · v9.10 点击跳转 + AI 总结提示词
 - ✅ v9.11 时间轴校正 · v9.12 往返一致性 · v9.14 AI 厂商可切换 · v9.17 默认关闭自动转写
-- ✅ v9.18 结果留存 + BV 直取 · v9.19 导出区降噪（一个主操作）
+- ✅ v9.18 结果留存 + BV 直取 · v9.19 导出区降噪 · v9.20 BV 远程直取（不跳页）
 - ⬜ **下一步**：真实站点字幕语料回归集（fixtures）
 - ⬜ YouTube 音频解流签名（解开后无字幕也能转写）
 - ⬜ 更多站点：西瓜 / 腾讯视频 / 微博视频 / Vimeo

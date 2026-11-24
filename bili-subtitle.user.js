@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.20.1
-// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页）；设置面板按步骤分组并标注各厂商是否支持转写。
+// @version      9.21.0
+// @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
 // @match        *://*/*
@@ -1567,12 +1567,24 @@
     return null;
   }
   function trimHistory() {
-    while (jobHistory.length > JOBS_MAX) jobHistory.pop();   // 新的在前，旧的从尾部淘汰
+    // v9.21：上限从「5 条结果」改成「5 个视频」。多 P 合集一个视频就有几十 P，
+    // 按条数淘汰会把同一个合集的其它 P 一起挤掉，导致「刚取完 P2，P1 没了」。
+    var seen = [], i;
+    for (i = 0; i < jobHistory.length; i++) {
+      var key = jobHistory[i].bvid || ('#' + jobHistory[i].id);
+      if (seen.indexOf(key) < 0) seen.push(key);
+    }
+    if (seen.length <= JOBS_MAX) return;
+    var allowed = {};
+    seen.slice(0, JOBS_MAX).forEach(function (k) { allowed[k] = 1; });
+    jobHistory = jobHistory.filter(function (h) { return allowed[h.bvid || ('#' + h.id)]; });
   }
   function pushHistory(entry) {
     if (!entry || !entry.body || !entry.body.length) return null;
+    // 同一视频的不同 P 是不同结果：去重键要用 bvid + page，不能只按 bvid。
     for (var i = 0; i < jobHistory.length; i++) {
-      if (jobHistory[i].bvid && jobHistory[i].bvid === entry.bvid) { jobHistory.splice(i, 1); break; }
+      if (jobHistory[i].bvid && jobHistory[i].bvid === entry.bvid
+        && (jobHistory[i].page || 1) === (entry.page || 1)) { jobHistory.splice(i, 1); break; }
     }
     jobHistory.unshift(entry);
     trimHistory();
@@ -3758,7 +3770,8 @@
   }
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
-  var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1, direct: null };
+  var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1, direct: null,
+    parts: [], partBusy: 0, partErr: {}, partDone: {} };   // v9.21 多 P：分 P 列表、正在取的 P、失败原因、已取到的任务 id
   function fmtCount(n) {
     n = Number(n) || 0;
     if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + ' 亿';
@@ -3778,80 +3791,122 @@
   function openDirect() {
     var d = search.direct;
     if (!d) return;
+    if (d.multi) return;   // 多 P：用列表里每一行的「取字幕」，点标题卡不做整段重抓
     if (d.jump) { pendingAutoBvid = d.bvid; toast('正在打开 ' + d.bvid + '，到达后自动解析'); location.href = d.url; return; }
     if (state.bvid === d.bvid) { toast('当前就是该视频，开始解析…'); getSubtitles(); return; }
     remoteGrab(d.bvid);
   }
 
   // v9.20 远程直取：不离开当前页，直接走接口把字幕取回来存进历史结果。
-  // 只有拿不到时才退化成「打开视频页」——搜索页该有的样子。
+  // v9.21 多 P：先把分 P 列出来，点哪个取哪个——不并发，避免一口气打几十个接口被风控。
   var remoteBusy = false;
+  var REMOTE_REF = 'https://www.bilibili.com/';
+
+  async function grabPart(bv, pg, meta) {
+    if (remoteBusy) { toast('正在获取，请稍候'); return; }
+    remoteBusy = true;
+    search.loading = true;
+    search.partBusy = pg.page || 1;
+    render();
+    try {
+      await getWbiKeys();
+      var q = function () { return wbiQuery({ cid: pg.cid, bvid: bv, isGaiaAvoided: true }); };
+      var d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + q(), { timeout: 10000, retries: 1, referer: REMOTE_REF }));
+      if (d.code !== 0) {
+        await getWbiKeys(true);
+        d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + q(), { timeout: 10000, retries: 1, referer: REMOTE_REF }));
+      }
+      if (d.code === -101) throw new Error('需要登录 B 站才能读字幕');
+      if (d.code !== 0) throw new Error('字幕接口返回 ' + d.code);
+
+      var root = (d.data && d.data.subtitle) || {};
+      var list = (root.subtitles || []).filter(function (s) { return s && s.subtitle_url; });
+      if (!list.length) throw new Error('这个 P 没有现成字幕');
+
+      var cand = list.map(function (s) {
+        var u = s.subtitle_url;
+        return { lan: s.lan || '', lan_doc: s.lan_doc || s.lan || '', ai: /^ai-|^asr-/i.test(s.lan || ''), url: u.indexOf('http') === 0 ? u : 'https:' + u };
+      }).sort(function (a, b) { return langScore(a) - langScore(b); });
+      var pick = cand[0];
+      var raw = JSON.parse(await gx(pick.url, { timeout: 30000, retries: 1, referer: REMOTE_REF }));
+      var body = mergeBodies([raw]);
+      if (!body || !body.length) throw new Error('字幕内容为空');
+      body.incomplete = checkIntegrity(body, Number(pg.duration) || 0);
+      body = maybePolish(body);
+
+      var page = pg.page || 1;
+      var id = newJobId();
+      pushHistory({ id: id, bvid: bv, url: 'https://www.bilibili.com/video/' + bv + (page > 1 ? '?p=' + page : ''),
+        title: meta.title, pageTitle: pg.part || '', up: meta.up,
+        lan: pick.lan_doc || pick.lan, body: body, createdAt: Date.now(), source: '远程直取',
+        page: page, totalPages: meta.total });
+      search.partDone[page] = id;
+      if (meta.total <= 1) {
+        search.direct = null;
+        search.parts = [];
+      }
+      // 多 P 时保留分 P 列表：回到「BV 直取」还能接着点别的 P，
+      // 已取过的行按钮会变成「📋 复制」，点一下就复制这一 P。
+      search.err = '';
+      viewingJobId = id;
+      var tabSub = document.querySelector('#bsr-root .bsr-tab[data-tab="sub"]');
+      if (tabSub) tabSub.click();
+      toast('已取到 ' + (meta.total > 1 ? 'P' + page + ' ' : '') + '字幕：' + (pg.part || meta.title)
+        + (meta.total > 1 ? ' · 回「BV 直取」可继续取其它 P' : ' · 可在右侧复制'));
+    } catch (e) {
+      log('远程直取失败', e);
+      var msg = (e && e.message) || '网络异常';
+      if (meta.total > 1) {
+        // 多 P：只标这一 P 失败，列表保留，别的 P 照常能点
+        search.partErr[pg.page || 1] = msg;
+        toast('P' + (pg.page || 1) + ' 取不到：' + msg);
+      } else {
+        search.err = '远程取不到：' + msg + '。可点下方卡片打开视频页再取。';
+        search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
+      }
+    } finally {
+      remoteBusy = false;
+      search.loading = false;
+      search.partBusy = 0;
+      render();
+    }
+  }
+
   async function remoteGrab(bv) {
     if (remoteBusy) { toast('正在远程获取，请稍候'); return; }
     remoteBusy = true;
     search.loading = true;
     search.items = [];
     search.err = '';
+    search.parts = [];
+    search.partErr = {};
     search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv };
     render();
-    var ref = 'https://www.bilibili.com/';
+    var pl, vdd, meta;
     try {
-      var pl = JSON.parse(await gx('https://api.bilibili.com/x/player/pagelist?bvid=' + bv, { timeout: 8000, retries: 1, referer: ref }));
+      pl = JSON.parse(await gx('https://api.bilibili.com/x/player/pagelist?bvid=' + bv, { timeout: 8000, retries: 1, referer: REMOTE_REF }));
       if (pl.code !== 0 || !pl.data || !pl.data.length) throw new Error('视频不存在、已删除，或 BV 号有误');
-      var pg = pl.data[0];
-      var vd = JSON.parse(await gx('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, { timeout: 8000, retries: 1, referer: ref }));
-      var vdd = (vd.code === 0 && vd.data) ? vd.data : {};
-      var title = vdd.title || pg.part || bv;
-      var up = (vdd.owner && vdd.owner.name) || '';
-      var dur = Number(vdd.duration || pg.duration) || 0;
-
-      await getWbiKeys();
-      var d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + wbiQuery({ cid: pg.cid, bvid: bv, isGaiaAvoided: true }), { timeout: 10000, retries: 1, referer: ref }));
-      if (d.code !== 0) {
-        await getWbiKeys(true);
-        d = JSON.parse(await gx('https://api.bilibili.com/x/player/wbi/v2?' + wbiQuery({ cid: pg.cid, bvid: bv, isGaiaAvoided: true }), { timeout: 10000, retries: 1, referer: ref }));
-      }
-      if (d.code === -101) throw new Error('该视频字幕需要登录 B 站后才能读取');
-      if (d.code !== 0) throw new Error('字幕接口返回 ' + d.code);
-
-      var root = (d.data && d.data.subtitle) || {};
-      var list = (root.subtitles || []).filter(function (s) { return s && s.subtitle_url; });
-      if (!list.length) {
-        search.err = '这个视频没有现成字幕。点下方卡片打开视频页，再用「🎙 AI 转写」。';
-        search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
-        return;
-      }
-      var cand = list.map(function (s) {
-        var u = s.subtitle_url;
-        return { lan: s.lan || '', lan_doc: s.lan_doc || s.lan || '', ai: /^ai-|^asr-/i.test(s.lan || ''), url: u.indexOf('http') === 0 ? u : 'https:' + u };
-      }).sort(function (a, b) { return langScore(a) - langScore(b); });
-      var pick = cand[0];
-      var raw = JSON.parse(await gx(pick.url, { timeout: 30000, retries: 1, referer: ref }));
-      var body = mergeBodies([raw]);
-      if (!body || !body.length) throw new Error('字幕内容为空');
-      body.incomplete = checkIntegrity(body, dur);
-      body = maybePolish(body);
-
-      var id = newJobId();
-      pushHistory({ id: id, bvid: bv, url: 'https://www.bilibili.com/video/' + bv, title: title, up: up,
-        lan: pick.lan_doc || pick.lan, body: body, createdAt: Date.now(), source: '远程直取',
-        page: 1, totalPages: pl.data.length });
-      search.direct = null;
-      search.err = '';
-      viewingJobId = id;
-      // 远程直取成功后回到「字幕提取」页，直接看到取回的内容
-      var tabSub = document.querySelector('#bsr-root .bsr-tab[data-tab="sub"]');
-      if (tabSub) tabSub.click();
-      toast('已远程取到字幕：' + title + ' · 可在右侧复制或导出');
+      var vd = JSON.parse(await gx('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, { timeout: 8000, retries: 1, referer: REMOTE_REF }));
+      vdd = (vd.code === 0 && vd.data) ? vd.data : {};
+      meta = { title: vdd.title || pl.data[0].part || bv, up: (vdd.owner && vdd.owner.name) || '', total: pl.data.length };
     } catch (e) {
-      log('远程直取失败', e);
-      search.err = '远程取不到：' + ((e && e.message) || '网络异常') + '。可点下方卡片打开视频页再取。';
-      search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
-    } finally {
       remoteBusy = false;
       search.loading = false;
+      search.err = '远程取不到：' + ((e && e.message) || '网络异常') + '。可点下方卡片打开视频页再取。';
+      search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, jump: true };
       render();
+      return;
     }
+    remoteBusy = false;
+    search.loading = false;
+    if (meta.total > 1) {
+      // 多 P：只列出来，不自动抓——一次取一个，点哪个取哪个
+      search.parts = pl.data;
+      search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, title: meta.title, up: meta.up, total: meta.total, multi: true };
+      render();
+      return;
+    }
+    await grabPart(bv, pl.data[0], meta);
   }
   async function runSearch() {
     var keyword = (search.keyword || '').trim();
@@ -4260,6 +4315,22 @@
       '.bsr-sub{display:inline-block;font-size:10px;border-radius:4px;padding:0 4px}' +
       '.bsr-sub.yes{background:#e6f9f1;color:#0a8f5f}.bsr-sub.no{background:#fdeeee;color:#c05050}' +
       '.bsr-empty{font-size:11px;color:#aaa;text-align:center;padding:18px 0;line-height:1.7}' +
+      // v9.21 多 P 列表：一次只取一个，行数不设上限，超出滚动
+      '.bsr-partlist{display:flex;flex-direction:column;gap:4px;max-height:260px;overflow:auto;margin-top:6px;padding-right:2px}' +
+      '.bsr-part{display:flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #ececf3;border-radius:7px;background:#fff}' +
+      '.bsr-part .no{flex:none;font-size:10px;font-weight:700;color:#e2568b;min-width:22px}' +
+      '.bsr-part .tt{flex:1;min-width:0;font-size:11px;color:#444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-part .du{flex:none;font-size:10px;color:#a0a0aa;font-variant-numeric:tabular-nums}' +
+      '.bsr-partget{flex:none;font-size:11px;line-height:1;padding:4px 8px;border:1px solid #f3c2d3;border-radius:6px;background:#fff7fa;color:#d94a72;cursor:pointer;font-family:inherit}' +
+      '.bsr-partget:hover{background:#ffeef4}' +
+      '.bsr-partget[disabled]{opacity:.6;cursor:default}' +
+      '.bsr-part.bad{border-color:#f0d0d0;background:#fffafa}' +
+      '.bsr-part.bad .no{color:#c0392b}' +
+      '.bsr-part.done{border-color:#cdeadd;background:#f8fdfa}' +
+      '.bsr-part.done .no{color:#0a8f5f}' +
+      '.bsr-partget[data-done="1"]{border-color:#bfe7d1;background:#f1fbf5;color:#0a8f5f}' +
+      '.bsr-partget[data-done="1"]:hover{background:#e7f8ee}' +
+      '.bsr-parterr{font-size:10px;color:#c0392b;padding:0 8px 2px 36px;line-height:1.4}' +
       '.bsr-wtip{font-size:10px;color:#888;line-height:1.6;margin-bottom:6px}' +
       '.bsr-wrow{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:11px}' +
       '.bsr-wrow label{flex:none;width:120px;color:#555;cursor:pointer;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
@@ -4314,6 +4385,11 @@
       '#bsr-root[data-theme="dark"] .bsr-res-t{color:var(--bsr-fg)}' +
       '#bsr-root[data-theme="dark"] .bsr-res-m{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-empty{color:#8a8a92}' +
+      '#bsr-root[data-theme="dark"] .bsr-part{background:#232329;border-color:#33333c}' +
+      '#bsr-root[data-theme="dark"] .bsr-part .tt{color:#d6d6dc}' +
+      '#bsr-root[data-theme="dark"] .bsr-partget{background:#2c2230;border-color:#5a3a4a;color:#f08bab}' +
+      '#bsr-root[data-theme="dark"] .bsr-part.done{background:#1e2a24;border-color:#355445}' +
+      '#bsr-root[data-theme="dark"] .bsr-partget[data-done="1"]{background:#1f2f27;border-color:#3d6450;color:#7fd0a6}' +
       '#bsr-root[data-theme="dark"] .bsr-wtip{color:var(--bsr-muted)}' +
       '#bsr-root[data-theme="dark"] .bsr-wrow label{color:#c5c5cc}' +
       '#bsr-root[data-theme="dark"] .bsr-findinfo{color:#b9a3ff}' +
@@ -4436,10 +4512,10 @@
       '      <span id="bsrHistViewTitle">正在查看历史结果</span>' +
       '      <button class="bsr-btn bsr-t" id="bsrHistViewBack">↩ 返回当前视频</button>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span>/5）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
+      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span> 条 · 最多 5 个视频）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
       '    <div class="bsr-pbox" id="bsrHistoryBox">' +
       '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
-      '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多 5 条）。</div>' +
+      '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多留 5 个视频，多 P 合集的所有 P 都算同一个视频）。</div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrAxisToggle">⏱ 时间轴（对不上就整体挪 · 只导出后半段）</div>' +
       '    <div class="bsr-pbox" id="bsrAxisBox">' +
@@ -4462,7 +4538,7 @@
       '        <input class="bsr-input" id="bsrSearchKw" placeholder="BV1xx411c7mD 或视频链接" />' +
       '        <button class="bsr-btn bsr-s" id="bsrSearchBtn" style="flex:none">获取</button>' +
       '      </div>' +
-      '      <div class="bsr-bv-tip">不用打开视频页：直接连 B 站接口把字幕取回来，取到后进「🗂 历史结果」查看、复制、导出。没有现成字幕时，会给你一个跳转入口去用 AI 转写。</div>' +
+      '      <div class="bsr-bv-tip">不用打开视频页：直接连 B 站接口把字幕取回来，取到后进「🗂 历史结果」查看、复制、导出。多 P 合集会先列出所有分 P，点哪个取哪个，已取的点「📋 复制」；没有现成字幕时会给你一个跳转入口去用 AI 转写。</div>' +
       '      <div style="display:none">' +
       '        <select id="bsrSearchPlatform"><option value="bilibili">B站</option><option value="youtube">YouTube</option></select>' +
       '        <select id="bsrSearchOrder"><option value="totalrank">综合</option></select>' +
@@ -4881,6 +4957,27 @@
     root.querySelector('#bsrCorrect').onclick = runLlmCorrect;
     // 结果卡片：点一下直接用本脚本打开该视频（v9.16 起不再有「先展开评分理由」这一层）
     root.querySelector('#bsrSearchResults').onclick = function (e) {
+      var t = e.target;
+      // v9.21 多 P：点哪一行就取哪个 P，一次只发一个请求
+      var pb = t && t.closest ? t.closest('.bsr-partget') : null;
+      if (pb) {
+        var pn = Number(pb.getAttribute('data-page'));
+        var md = search.direct;
+        if (!md || !md.multi) return;
+        if (pb.getAttribute('data-done') === '1') {
+          // 已取过：直接复制这一 P 的字幕，不用再点进历史
+          var hj = findJob(search.partDone[pn]);
+          if (hj && hj.body) { copyText(bodyToTxt(hj.body)); toast('已复制 P' + pn + ' 字幕 · ' + (hj.pageTitle || hj.title)); }
+          return;
+        }
+        var pg = null;
+        for (var k = 0; k < search.parts.length; k++) {
+          if (Number(search.parts[k].page) === pn) { pg = search.parts[k]; break; }
+        }
+        if (pg) grabPart(md.bvid, pg, { title: md.title, up: md.up, total: md.total });
+        return;
+      }
+      if (t && t.closest && t.closest('.bsr-multi-head')) return;
       var direct = e.target && e.target.closest ? e.target.closest('#bsrDirectCard') : null;
       if (direct) { openDirect(); return; }
       var card = e.target && e.target.closest ? e.target.closest('.bsr-res') : null;
@@ -5132,11 +5229,33 @@
     else if (search.err) sst.textContent = '⚠️ ' + search.err;
     else if (search.items.length) sst.textContent = '✅ ' + search.items.length + ' 个结果 · 有字幕优先 · 点卡片直接打开视频';
     else sst.textContent = '';
-    var sig = search.loading + '|' + search.err + '|' + search.items.length;
+    var sig = search.loading + '|' + search.err + '|' + search.items.length
+      + '|' + search.parts.length + '|' + search.partBusy
+      + '|' + Object.keys(search.partErr).length + '|' + Object.keys(search.partDone).length;
     if (sig !== render._searchSig) {
       render._searchSig = sig;
       var sbox = $('#bsrSearchResults');
-      if (search.direct) {
+      if (search.direct && search.direct.multi && search.parts.length) {
+        // v9.21 多 P：标题卡 + 逐 P 列表，点「取字幕」才请求该 P（一次一个，不并发）
+        var md = search.direct;
+        sbox.innerHTML =
+          '<div class="bsr-res bsr-multi-head">' +
+            '<div class="bsr-res-t"><span>' + escHtml(md.title || md.bvid) + '</span></div>' +
+            '<div class="bsr-res-m">' + escHtml(md.bvid) + ' · 共 ' + md.total + ' P · 点「取字幕」逐个取，已取的点「📋 复制」直接复制该 P</div>' +
+          '</div>' +
+          '<div class="bsr-partlist">' + search.parts.map(function (p) {
+            var bad = search.partErr[p.page];
+            var busy = search.partBusy === p.page;
+            var done = !!search.partDone[p.page];
+            return '<div class="bsr-part' + (bad ? ' bad' : '') + (done ? ' done' : '') + '">' +
+              '<span class="no">P' + p.page + '</span>' +
+              '<span class="tt" title="' + escHtml(p.part || '') + '">' + escHtml(p.part || ('P' + p.page)) + '</span>' +
+              '<span class="du">' + fmtDurSec(Number(p.duration) || 0) + '</span>' +
+              '<button type="button" class="bsr-partget" data-page="' + p.page + '" data-done="' + (done ? '1' : '0') + '"' + (busy ? ' disabled' : '') + '>' +
+                (busy ? '⏳ 取中' : (done ? '📋 复制' : (bad ? '重试' : '取字幕'))) + '</button>' +
+              '</div>' + (bad ? '<div class="bsr-parterr">' + escHtml(bad) + '</div>' : '');
+          }).join('') + '</div>';
+      } else if (search.direct) {
         // v9.17：贴了 BV 号 —— 给一张直取卡片，不再列一堆搜索结果
         var d = search.direct;
         var here = (state.bvid === d.bvid);
@@ -5185,7 +5304,7 @@
       var back = $('#bsrHistViewBack');
       if (h) {
         bar.style.display = 'flex';
-        $('#bsrHistViewTitle').textContent = '只读查看：' + (h.title || h.bvid || '历史结果');
+        $('#bsrHistViewTitle').textContent = '只读查看：' + ((h.totalPages > 1 ? 'P' + (h.page || 1) + ' ' : '') + (h.pageTitle || h.title || h.bvid || '历史结果'));
         if (back) back.style.display = '';
       } else if (jobActive && jobActive.state && jobActive.state.detached) {
         // 用户在别的视频页面，后台任务仍在跑：给一条常驻提示，避免「以为丢了」
@@ -5214,7 +5333,7 @@
       open.type = 'button';
       open.className = 'bsr-histopen';
       var b = document.createElement('b');
-      b.textContent = (h.page > 1 ? 'P' + h.page + ' ' : '') + (h.title || h.bvid || '未命名视频');
+      b.textContent = (h.totalPages > 1 ? 'P' + (h.page || 1) + ' ' : '') + (h.pageTitle || h.title || h.bvid || '未命名视频');
       var i = document.createElement('i');
       i.textContent = (h.source === 'asr' ? 'AI 转写' : '字幕') + ' · '
         + ((h.body && h.body.length) ? h.body.length + ' 句' : '')

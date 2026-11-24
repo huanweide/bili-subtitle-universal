@@ -16,7 +16,7 @@
 </p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.20.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.21.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -35,21 +35,21 @@
 <p align="center">
   <img src="assets/shot-subtitles.png" width="31%" alt="官方字幕面板：语言轨道、逐行时间轴、复制与六种导出">
   <img src="assets/shot-asr.png" width="31%" alt="AI 转写面板：五步进度条、音频体积与预计剩余时间、实时字幕流">
-  <img src="assets/shot-history.png" width="31%" alt="历史结果面板：最近 5 条解析结果，点开查看、右侧一键复制">
+  <img src="assets/shot-history.png" width="31%" alt="历史结果面板：最近 5 个视频的解析结果，点开查看、右侧一键复制">
 </p>
 
 **① 有官方字幕** — WBI 签名调官方接口，人工字幕优先于 AI 字幕，中文优先。取回即可逐行点跳、检索、整体校正时间轴。
 
 **② 没字幕** — 分段解码后送 ASR，边转边显示；进度、已处理时长、预计剩余都是实打实算出来的。
 
-**③ 跑着走开** — 切到别的视频，任务转入后台继续；结束后自动归档，最多留 5 条，随时回来逐条复制。
+**③ 跑着走开** — 切到别的视频，任务转入后台继续；结束后自动归档，最多留 5 个视频，随时回来逐条复制。
 
 <p align="center">
   <img src="assets/shot-dark.png" width="300" alt="深色模式下的字幕面板">
-  <img src="assets/shot-search.png" width="300" alt="贴一个 BV 号，不跳页直接取回字幕并渲染成可复制列表">
+  <img src="assets/shot-search.png" width="300" alt="贴一个 BV 号，不跳页直接取回字幕；多 P 合集会列出每个分 P，逐个取、逐个复制">
 </p>
 
-<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ BV 直取：贴 BV 号或链接，不跳页直接远程取回字幕</sub></p>
+<p align="center"><sub>深色模式 · 跟随系统，也可手动切 ｜ BV 直取：贴 BV 号或链接，不跳页直接远程取回字幕；多 P 合集逐 P 提取、逐 P 复制</sub></p>
 
 ---
 
@@ -91,7 +91,7 @@
 |---|---|
 | **只想把字幕拿出来**，不写代码 | [快速开始](#快速开始--quick-start)：装 Tampermonkey → 装脚本 → 点 ⚡ |
 | **视频没字幕**，要 AI 听写 | 同上，再到 ⚙ 设置填一个 API Key（有免费额度的厂商已标注） |
-| **要批量取**，边跑边切别的视频 | 打开「🗂 历史结果」，最近 5 条自动留存，逐条复制 |
+| **要批量取**，边跑边切别的视频 | 打开「🗂 历史结果」，最近 5 个视频自动留存（多 P 合集整组保留），逐条复制 |
 | **想接自己的站点或厂商** | [加一个你自己的站点](#加一个你自己的站点--厂商) |
 | **想跑测试 / 提 PR** | [贡献](#贡献-contributing)，一条命令：`node tests/run-tests.js` |
 
@@ -131,7 +131,7 @@ User: 打开一个嵌了 player.bilibili.com/player.html 的网页
 
 ## 特性 / Features
 
-- **解析结果留存 (JobArchive)** — 转写任务与页面解耦：切到别的视频不会中断，跑完自动归档最近 5 条，可逐条查看与单条复制；手动「中断」才真正停止
+- **解析结果留存 (JobArchive)** — 转写任务与页面解耦：切到别的视频不会中断，跑完自动归档最近 5 个视频（多 P 合集的所有 P 一起保留），可逐条查看与单条复制；手动「中断」才真正停止
 - **认领表引擎 (SiteMatch)** — 站点与页面形态的识别集中成一张可测试的表，不再散在正则里；没有播放器的页面一律不认领——认领了却取不到字幕，比不认领更伤信任。见 `modules/site-match.js`
 - **四层转写防线 (fallback ladder)** — 分段解码（首选，不播放、内存恒定）→ 整段直传（≤40MB）→ 解码切片（16kHz）→ 静音播放录制（兜底）；前一路不通自动走下一路，一条路堵不死
 - **断点闸门 (SegResume)** — 每批约 2 分钟音频转完即落盘，刷新 / 误关 / 断网后重转自动跳过已完成部分，**不花第二遍钱**；断点按「BV 号 + P 号 + 音频地址」识别，24 小时有效
@@ -196,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.20.1 · 用例 86）
+结果：全部一致（版本 9.21.0 · 用例 86）
 ```
 
 ---
@@ -359,7 +359,7 @@ myvendor: {
 - ✅ v9.0 分段解码 · v9.4 分段断点续传 · v9.6 锚点不误伤 · v9.7 深色模式
 - ✅ v9.8 认领表 · v9.9 字幕内检索 + VTT/MD · v9.10 点击跳转 + AI 总结提示词
 - ✅ v9.11 时间轴校正 · v9.12 往返一致性 · v9.14 AI 厂商可切换 · v9.17 默认关闭自动转写
-- ✅ v9.18 结果留存 + BV 直取 · v9.19 导出区降噪 · v9.20 BV 远程直取（不跳页）
+- ✅ v9.18 结果留存 + BV 直取 · v9.19 导出区降噪 · v9.20 BV 远程直取（不跳页）· v9.21 多 P 逐 P 提取
 - ⬜ **下一步**：真实站点字幕语料回归集（fixtures）
 - ⬜ YouTube 音频解流签名（解开后无字幕也能转写）
 - ⬜ 更多站点：西瓜 / 腾讯视频 / 微博视频 / Vimeo

@@ -83,7 +83,7 @@ One panel, covering the three situations you actually run into.
 ## Walk away while it runs
 
 <p align="center">
-  <img src="assets/demo-history.gif" width="420" alt="Animation: after a job finishes, open history, view an entry, copy it from the right">
+  <img src="assets/demo-history.gif" width="420" alt="Animation: history list, click the button on the right to copy one transcript">
 </p>
 
 Switching videos used to kill a running transcription and waste the money already spent. Now the job just continues in the background and files itself under **🗂 History** when done. **The only way to stop it is the ✖ Cancel button.**

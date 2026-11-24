@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.20.0
+// @version      9.20.1
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 条，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页）；设置面板按步骤分组并标注各厂商是否支持转写。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -4436,13 +4436,13 @@
       '      <span id="bsrHistViewTitle">正在查看历史结果</span>' +
       '      <button class="bsr-btn bsr-t" id="bsrHistViewBack">↩ 返回当前视频</button>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span>/5）· 点条目查看，右侧复制</div>' +
-      '    <div class="bsr-pbox" id="bsrHistoryBox" style="display:none">' +
+      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span>/5）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
+      '    <div class="bsr-pbox" id="bsrHistoryBox">' +
       '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
       '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多 5 条）。</div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrAxisToggle">⏱ 时间轴（对不上就整体挪 · 只导出后半段）</div>' +
-      '    <div class="bsr-pbox" id="bsrAxisBox" style="display:none">' +
+      '    <div class="bsr-pbox" id="bsrAxisBox">' +
       '      <div class="bsr-wrow"><label>整体偏移（秒，可负）</label><input type="number" id="bsrShift" step="0.5" placeholder="0" /></div>' +
       '      <div class="bsr-prompts">' +
       '        <button type="button" id="bsrFromNow">⏱ 只保留当前播放位置之后</button>' +
@@ -4451,7 +4451,7 @@
       '      <div class="bsr-wtip" id="bsrAxisTip">偏移只改导出文件里的时间戳（和点击跳转落点），不改文字；「只保留当前位置之后」会同时收窄文本框与所有导出。</div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrPromptToggle">🧠 AI 总结提示词（复制后直接粘给 AI）</div>' +
-      '    <div class="bsr-pbox" id="bsrPromptBox" style="display:none">' +
+      '    <div class="bsr-pbox" id="bsrPromptBox">' +
       '      <div class="bsr-prompts" id="bsrPrompts"></div>' +
       '      <div class="bsr-wtip" id="bsrPromptTip">点了就把「提示词 + 当前稿子」一起复制，粘进任意 AI 对话框即可。检索有命中时只带命中行。</div>' +
       '    </div>' +
@@ -5075,7 +5075,9 @@
     // v9.16.1 没字幕时连带隐藏「⏱ 时间轴」整块：没有东西可偏移/裁剪，挂着就是无意义显示
     var at = $('#bsrAxisToggle'), ab = $('#bsrAxisBox');
     if (at) at.style.display = VS.body ? '' : 'none';
-    if (ab && !VS.body) ab.style.display = 'none';
+    // 注意要写成双向：只设 none 不清空，会把 inline display 留在元素上，
+    // 之后 classList.toggle('show') 再也盖不过它（历史/时间轴/提示词三个盒子都踩过）。
+    if (ab) ab.style.display = VS.body ? '' : 'none';
     if (fi) {
       var res = VS.body ? SubExport.searchBody(VS.body, VS.searchKw) : null;
       if (res && VS.searchKw) {
@@ -5176,6 +5178,8 @@
       if (box) box.classList.remove('show');
     }
     var bar = $('#bsrHistViewBar');
+    var ar = $('#bsrHistArrow');
+    if (ar && box) ar.textContent = box.classList.contains('show') ? '▾' : '▸';
     if (bar) {
       var h = viewingJobId ? findJob(viewingJobId) : null;
       var back = $('#bsrHistViewBack');
@@ -5215,6 +5219,7 @@
       i.textContent = (h.source === 'asr' ? 'AI 转写' : '字幕') + ' · '
         + ((h.body && h.body.length) ? h.body.length + ' 句' : '')
         + ' · ' + new Date(h.createdAt).toLocaleTimeString()
+        + (h.bvid ? ' · ' + h.bvid : '')
         + (h.incomplete ? ' · 不完整' : '');
       open.appendChild(b);
       open.appendChild(i);
@@ -5239,6 +5244,11 @@
     if (!findJob(id)) return;
     viewingJobId = id;
     render();
+    // 用户可能正停在「BV 直取」页，历史正文在字幕页里；不切回去就会以为点了没反应。
+    var tabSub = document.querySelector('#bsr-root .bsr-tab[data-tab="sub"]');
+    if (tabSub) tabSub.click();
+    var sc = document.querySelector('#bsr-root .bsr-b');
+    if (sc) sc.scrollTop = 0;
   }
 
   function closeHistoryJob() {

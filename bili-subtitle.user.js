@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.21.2
+// @version      9.21.3
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1549,8 +1549,9 @@
       if (!raw) return;
       var arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return;
-      arr.forEach(function (h) { if (h && h.body && h.body.length) h.body.incomplete = !!h.incomplete; });
-      jobHistory = arr.filter(function (h) { return h && h.body && h.body.length; });
+      arr.forEach(function (h) { if (h && h.body) h.body.incomplete = !!h.incomplete; });
+      // 「分P信息」条目本来就没有正文，不能按 body 长度过滤掉
+      jobHistory = arr.filter(function (h) { return h && (h.source === '分P信息' || (h.body && h.body.length)); });
     } catch (e) { log('历史恢复失败', e); }
   }
   loadHistory();
@@ -1605,7 +1606,10 @@
     jobHistory = jobHistory.filter(function (h) { return allowed[h.bvid || ('#' + h.id)]; });
   }
   function pushHistory(entry) {
-    if (!entry || !entry.body || !entry.body.length) return null;
+    if (!entry) return null;
+    // v9.21.3：「分P信息」是只有标题+链接的轻量条目，允许没有字幕正文；
+    // 其它来源仍然拒绝空结果，避免把失败任务存成历史。
+    if ((!entry.body || !entry.body.length) && entry.source !== '分P信息') return null;
     // 同一视频的不同 P 是不同结果：去重键要用 bvid + page，不能只按 bvid。
     for (var i = 0; i < jobHistory.length; i++) {
       if (jobHistory[i].bvid && jobHistory[i].bvid === entry.bvid
@@ -4295,6 +4299,11 @@
       '.bsr-set{margin:8px 0 4px;font-size:12px;color:#7C5CBF;cursor:pointer;user-select:none}' +
       '.bsr-histtoggle{background:#f7f7fb;border-radius:8px;padding:7px 10px;margin:2px 0 4px;font-size:11px;color:#666}' +
       '.bsr-histtoggle.empty{color:#b3b3bc}' +
+      '.bsr-histgo{display:block;margin:0 auto 10px;font-size:11px;line-height:1;padding:5px 12px;border:1px solid #f3c2d3;border-radius:6px;background:#fff7fa;color:#d94a72;cursor:pointer;font-family:inherit}' +
+      '.bsr-histgo:hover{background:#ffeef4}' +
+      '.bsr-histfoot{display:flex;justify-content:flex-end;padding:2px 2px 2px}' +
+      '.bsr-histclear{font-size:10px;line-height:1;padding:3px 8px;border:1px solid #ececf3;border-radius:6px;background:#fff;color:#a0a0aa;cursor:pointer;font-family:inherit}' +
+      '.bsr-histclear:hover{color:#c05050;border-color:#f0d0d0}' +
       '#bsr-root[data-theme="dark"] .bsr-histtoggle{background:#242429;color:#c9c9d2}' +
       '#bsr-root[data-theme="dark"] .bsr-histtoggle.empty{color:#7b7b85}' +
       '.bsr-histbar{display:flex;align-items:center;gap:8px;margin:8px 0;padding:6px 8px;border-radius:6px;background:#fff6e5;border:1px solid #f0d9a8;font-size:11px;color:#8a6d3b}' +
@@ -4529,6 +4538,7 @@
       '    <div class="bsr-set bsr-histtoggle" id="bsrHistoryToggle">🗂 历史结果（<span id="bsrHistoryCount">0</span> 条 · 最多 5 个视频）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
       '    <div class="bsr-pbox" id="bsrHistoryBox">' +
       '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
+      '      <div class="bsr-histfoot"><button type="button" class="bsr-histclear" id="bsrHistClear">清空历史</button></div>' +
       '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多留 5 个视频，多 P 合集的所有 P 都算同一个视频）。刷新页面后历史也会保留。</div>' +
       '    </div>' +
       '    <div class="bsr-ta bsr-lines" id="bsrOut" tabindex="0" title="点某一行可以跳到视频的对应时间（可在设置里关掉）"></div>' +
@@ -4579,7 +4589,7 @@
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.2</span></div>' +
+      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.3</span></div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
       '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
       '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
@@ -4852,6 +4862,17 @@
       hb.classList.toggle('show');
       render();
     };
+    var histClear = root.querySelector('#bsrHistClear');
+    if (histClear) histClear.onclick = function () {
+      if (!jobHistory.length) return;
+      jobHistory = [];
+      saveHistory();
+      viewingJobId = 0;
+      var hb = root.querySelector('#bsrHistoryBox');
+      if (hb) hb.classList.remove('show');
+      render();
+      toast('历史已清空');
+    };
     root.querySelector('#bsrHistViewBack').onclick = function () { closeHistoryJob(); };
     root.querySelector('#bsrEye').onclick = function () {
       var k = root.querySelector('#bsrKey');
@@ -5029,6 +5050,13 @@
           } else {
             copyText('P' + rpn + ' ' + (rpg.part || '') + '\n' + rurl, true);
             toast('已复制 P' + rpn + ' 标题 + 链接');
+            // 只复制信息时也留一条轻量历史，否则「历史结果」一直空着，像坏了
+            if (!rhj) {
+              pushHistory({ id: newJobId(), bvid: rmd.bvid, url: rurl, title: rmd.title,
+                pageTitle: rpg.part || '', up: rmd.up, lan: '', body: [], createdAt: Date.now(),
+                source: '分P信息', page: rpn, totalPages: rmd.total });
+              render();   // 立刻刷新历史计数与列表，否则要等下一次 render 才看得到
+            }
           }
           return;
         }
@@ -5349,7 +5377,7 @@
     toggle.classList.toggle('empty', !jobHistory.length);
     var c = $('#bsrHistoryCount');
     if (c) c.textContent = jobHistory.length;
-    if (!jobHistory.length && box) box.classList.remove('show');
+    // 空态不强制收起：点开要能看到「去 BV 直取」的引导；真正的收起发生在清空动作里
     var bar = $('#bsrHistViewBar');
     var ar = $('#bsrHistArrow');
     if (ar && box) ar.textContent = box.classList.contains('show') ? '▾' : '▸';
@@ -5379,7 +5407,13 @@
     var host = root && root.querySelector('#bsrHistoryList');
     if (!host) return;
     if (!jobHistory.length) {
-      host.innerHTML = '<div class="bsr-empty">还没有历史结果。解析（或远程直取）完一个视频会自动存到这里，最多 5 个视频，刷新后也还在。</div>';
+      host.innerHTML = '<div class="bsr-empty">还没有历史结果。<br>去「BV 直取」贴一个 BV 号，取一条就会自动存到这里。</div>' +
+        '<button type="button" class="bsr-histgo" id="bsrHistGoSearch">去 BV 直取 →</button>';
+      var gs = host.querySelector('#bsrHistGoSearch');
+      if (gs) gs.onclick = function () {
+        var t = document.querySelector('#bsr-root .bsr-tab[data-tab="search"]');
+        if (t) t.click();
+      };
       return;
     }
     var oldTop = host.scrollTop;   // 重建时保留滚动位置，避免每次 render 跳回顶部
@@ -5392,9 +5426,10 @@
       open.className = 'bsr-histopen';
       var b = document.createElement('b');
       b.textContent = (h.totalPages > 1 ? 'P' + (h.page || 1) + ' ' : '') + (h.pageTitle || h.title || h.bvid || '未命名视频');
+      var hasBody = !!(h.body && h.body.length);
+      var srcTxt = h.source === 'asr' ? 'AI 转写' : (h.source === '分P信息' ? '分P信息' : '字幕');
       var i = document.createElement('i');
-      i.textContent = (h.source === 'asr' ? 'AI 转写' : '字幕') + ' · '
-        + ((h.body && h.body.length) ? h.body.length + ' 句' : '')
+      i.textContent = srcTxt + ' · ' + (hasBody ? h.body.length + ' 句' : '只有标题与链接')
         + ' · ' + new Date(h.createdAt).toLocaleTimeString()
         + (h.bvid ? ' · ' + h.bvid : '')
         + (h.incomplete ? ' · 不完整' : '');
@@ -5405,10 +5440,15 @@
       cp.type = 'button';
       cp.className = 'bsr-histcopy';
       cp.textContent = '📋';
-      cp.title = '复制这条字幕全文';
+      cp.title = hasBody ? '复制这条字幕全文' : '复制标题与链接';
       cp.onclick = function () {
-        copyText(bodyToTxt(h.body || []));
-        toast('已复制：' + (h.title || '历史结果'));
+        if (hasBody) {
+          copyText(bodyToTxt(h.body), true);
+          toast('已复制：' + (h.pageTitle || h.title || '历史结果'));
+        } else {
+          copyText((h.pageTitle || h.title || '') + '\n' + (h.url || ''), true);
+          toast('已复制标题 + 链接');
+        }
       };
       item.appendChild(open);
       item.appendChild(cp);
@@ -5418,7 +5458,12 @@
   }
 
   function openHistoryJob(id) {
-    if (!findJob(id)) return;
+    var h = findJob(id);
+    if (!h) return;
+    if (!h.body || !h.body.length) {
+      toast('这条只记了标题与链接，点右侧 📋 复制');
+      return;
+    }
     viewingJobId = id;
     render();
     // 用户可能正停在「BV 直取」页，历史正文在字幕页里；不切回去就会以为点了没反应。

@@ -16,7 +16,7 @@
 </p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.21.3-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.22.0-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -196,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.21.3 · 用例 86）
+结果：全部一致（版本 9.22.0 · 用例 86）
 ```
 
 ---
@@ -368,6 +368,24 @@ myvendor: {
 欢迎在 [Issues](https://github.com/huanweide/bili-subtitle-universal/issues) 里说你最想要哪一个。
 
 ---
+
+## 发布与 GitHub 同步
+
+代码同步就是 git：每次发布执行 `scripts/release.ps1`，它会依次跑语法检查、86 项单测、文档一致性、89 条宣传断言，全部通过后才 `git commit` + `git push` 到 `ghssh`（GitHub 仓库 `huanweide/bili-subtitle-universal` 的 `main`）。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Message "feat: 本次改动"
+```
+
+推送成功即代表 GitHub 已同步，`raw.githubusercontent.com/<repo>/<sha>/...` 立刻可读到该版本。
+
+**为什么有时看起来「没更新」**：jsDelivr 的 `@main` 有 CDN 缓存（最长约 12 小时），刚 push 完再访问 `@main` 可能仍是旧文件。要立刻装到新版，用脚本最后输出的**固定 commit 地址**：
+
+```text
+https://cdn.jsdelivr.net/gh/huanweide/bili-subtitle-universal@<sha>/bili-subtitle.user.js
+```
+
+固定 sha 地址不会命中旧缓存；`@main` 只适合「等缓存过期后自动跟随」。
 
 ## 贡献 / Contributing
 

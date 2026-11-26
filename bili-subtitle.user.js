@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.21.3
+// @version      9.22.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1534,12 +1534,24 @@
   function saveHistory() {
     try {
       if (typeof GM_setValue !== 'function') return;
-      var slim = jobHistory.map(function (h) {
-        return { id: h.id, bvid: h.bvid, url: h.url, title: h.title, pageTitle: h.pageTitle, up: h.up,
-          lan: h.lan, createdAt: h.createdAt, source: h.source, page: h.page, totalPages: h.totalPages,
-          incomplete: !!(h.body && h.body.incomplete), body: h.body };
-      });
-      GM_setValue(JOBS_STORE, JSON.stringify(slim));
+      var txt = '';
+      var guard = 0;
+      // 单键塞太大（多 P + 长视频）会写失败或卡顿：超过约 2.5MB 就从最旧的视频组开始丢，
+      // 内存与存储保持一致，避免「列表里有、刷新后没有」。
+      while (guard++ < 12) {
+        var slim = jobHistory.map(function (h) {
+          return { id: h.id, bvid: h.bvid, url: h.url, title: h.title, pageTitle: h.pageTitle, up: h.up,
+            lan: h.lan, createdAt: h.createdAt, source: h.source, page: h.page, totalPages: h.totalPages,
+            incomplete: !!(h.body && h.body.incomplete), body: h.body };
+        });
+        txt = JSON.stringify(slim);
+        if (txt.length <= 2500000 || jobHistory.length <= 1) break;
+        var lastBv = jobHistory[jobHistory.length - 1].bvid;
+        for (var i = jobHistory.length - 1; i >= 0; i--) {
+          if (jobHistory[i].bvid === lastBv) jobHistory.splice(i, 1);
+        }
+      }
+      GM_setValue(JOBS_STORE, txt);
     } catch (e) { log('历史保存失败（可能超出存储上限）', e); }
   }
   function loadHistory() {
@@ -1554,6 +1566,16 @@
       jobHistory = arr.filter(function (h) { return h && (h.source === '分P信息' || (h.body && h.body.length)); });
     } catch (e) { log('历史恢复失败', e); }
   }
+  var pendingTask = null;
+  // v9.22：把「未跑完的任务」单独记一笔。断点只对同一条视频有效，
+  // 用户关掉浏览器再打开别的视频时，需要看到「上次那条还没跑完」。
+  try {
+    var ptRaw = (typeof GM_getValue === 'function') ? GM_getValue('bsr_task_v1', '') : '';
+    if (ptRaw) {
+      var ptObj = JSON.parse(ptRaw);
+      if (ptObj && ptObj.at && Date.now() - ptObj.at < 24 * 3600 * 1000) pendingTask = ptObj;
+    }
+  } catch (ePT) {}
   loadHistory();
   var jobSeq = 0;
   var viewingJobId = 0;     // >0 = 正在查看某条历史结果（只读视图）
@@ -3307,6 +3329,11 @@
           log('断点数据超过大小上限，本轮不再保存断点（不影响本次转写）');
         }
       } catch (eW) { log('断点保存失败（不影响本次转写）', eW); }
+      // v9.22：同一时刻记一条「任务进度」，跨视频/重开浏览器后还能找到它
+      try {
+        GM_setValue('bsr_task_v1', JSON.stringify({ bvid: S.bvid || '', cid: S.cid || '', title: S.title || document.title,
+          url: location.href, done: bi + 1, total: S.asr.chunks.length, at: Date.now() }));
+      } catch (eT) {}
       render();
     }
 
@@ -3315,6 +3342,7 @@
     // 价值，还会让下次误判为可续传。
     if (!asrStop(S, myGen)) {
       try { SegResume.clearResume(GM_setValue); } catch (eC) {}
+      try { GM_setValue('bsr_task_v1', ''); } catch (eT2) {}
     }
     if (segsAll.length && S.asr) S.asr.progress = 100;
     return segsAll;
@@ -4299,6 +4327,11 @@
       '.bsr-set{margin:8px 0 4px;font-size:12px;color:#7C5CBF;cursor:pointer;user-select:none}' +
       '.bsr-histtoggle{background:#f7f7fb;border-radius:8px;padding:7px 10px;margin:2px 0 4px;font-size:11px;color:#666}' +
       '.bsr-histtoggle.empty{color:#b3b3bc}' +
+      '.bsr-taskbar{display:flex;align-items:center;gap:6px;padding:6px 10px;background:#fff8e6;border-bottom:1px solid #f1e2bc;font-size:11px;color:#8a6d1f}' +
+      '.bsr-taskbar .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-taskgo{flex:none;font-size:10px;line-height:1;padding:4px 9px;border:1px solid #e8c97a;border-radius:6px;background:#fff;color:#8a6d1f;cursor:pointer;font-family:inherit}' +
+      '.bsr-taskdrop{flex:none;font-size:11px;line-height:1;border:none;background:transparent;color:#a08b5a;cursor:pointer;padding:0 2px}' +
+      '#bsr-root[data-theme="dark"] .bsr-taskbar{background:#2f2a1d;border-bottom-color:#4a4028;color:#e0c884}' +
       '.bsr-histgo{display:block;margin:0 auto 10px;font-size:11px;line-height:1;padding:5px 12px;border:1px solid #f3c2d3;border-radius:6px;background:#fff7fa;color:#d94a72;cursor:pointer;font-family:inherit}' +
       '.bsr-histgo:hover{background:#ffeef4}' +
       '.bsr-histfoot{display:flex;justify-content:flex-end;padding:2px 2px 2px}' +
@@ -4502,6 +4535,7 @@
       '    <div class="bsr-tab on" data-tab="sub">📝 字幕提取</div>' +
       '    <div class="bsr-tab" data-tab="search">🔗 BV 直取</div>' +
       '  </div>' +
+      '  <div class="bsr-taskbar" id="bsrTaskBar" style="display:none"></div>' +
       '  <div class="bsr-b">' +
       '    <div class="bsr-pane show" id="bsrPaneSub">' +
       '    <div class="bsr-title" id="bsrTitle">—</div>' +
@@ -4589,7 +4623,7 @@
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.3</span></div>' +
+      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.22.0</span></div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
       '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
       '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
@@ -4841,6 +4875,8 @@
     // 音频 blob 已缓存不重下，断点已清，从第 1 批跑起。
     root.querySelector('#bsrAsrRestart').onclick = function () {
       try { SegResume.clearResume(GM_setValue); } catch (e) {}
+      try { GM_setValue('bsr_task_v1', ''); } catch (eT3) {}
+      pendingTask = null;
       asrGen++;
       toast('已放弃旧进度，从第 1 批重新开始');
       runAsr();
@@ -5398,6 +5434,31 @@
       } else {
         bar.style.display = 'none';
         if (back) back.style.display = '';
+      }
+    }
+    // v9.22：未完成任务条。断点只认「同一条视频」，这条提示负责把用户带回去。
+    var tb = root.querySelector('#bsrTaskBar');
+    if (tb) {
+      if (pendingTask) {
+        tb.style.display = 'flex';
+        tb.innerHTML = '<span class="tt">↻ 上次没跑完：' + escHtml(pendingTask.title || pendingTask.bvid || '未命名')
+          + '（' + (pendingTask.done || 0) + '/' + (pendingTask.total || '?') + '）</span>' +
+          '<button type="button" class="bsr-taskgo" id="bsrTaskGo">继续</button>' +
+          '<button type="button" class="bsr-taskdrop" id="bsrTaskDrop" title="忽略这条任务记录">✕</button>';
+        var go = tb.querySelector('#bsrTaskGo');
+        if (go) go.onclick = function () {
+          if (state.bvid && pendingTask.bvid && state.bvid === pendingTask.bvid) { getSubtitles(); }
+          else if (pendingTask.url) { location.href = pendingTask.url; }
+          else { toast('找不到原视频地址，请手动打开该视频'); }
+        };
+        var drop = tb.querySelector('#bsrTaskDrop');
+        if (drop) drop.onclick = function () {
+          pendingTask = null;
+          try { GM_setValue('bsr_task_v1', ''); } catch (eD) {}
+          render();
+        };
+      } else {
+        tb.style.display = 'none';
       }
     }
     if (box && box.classList.contains('show')) renderHistoryList();

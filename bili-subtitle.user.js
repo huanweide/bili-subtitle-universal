@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.22.0
+// @version      9.23.0
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -3829,7 +3829,7 @@
 
   // ===================== v9.2 搜索筛选 Tab（search-filter + candidate-scorer 接线） =====================
   var search = { loading: false, err: '', items: [], platform: SETTINGS.searchPlatform, keyword: '', order: 'totalrank', minPlay: 0, nativeOnly: false, expanded: -1, direct: null,
-    parts: [], partBusy: 0, partErr: {}, partDone: {} };   // v9.21 多 P：分 P 列表、正在取的 P、失败原因、已取到的任务 id
+    parts: [], partBusy: 0, partErr: {}, partDone: {}, curPage: 0 };   // v9.23：分 P 列表、正在取的 P、失败原因、已取任务 id、当前 P
   function fmtCount(n) {
     n = Number(n) || 0;
     if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, '') + ' 亿';
@@ -3917,6 +3917,11 @@
       if (meta.total > 1) {
         // 多 P：只标这一 P 失败，列表保留，别的 P 照常能点
         search.partErr[pg.page || 1] = msg;
+        // 失败也留一条「分P信息」：历史里至少能看到这个 P 和它的链接
+        pushHistory({ id: newJobId(), bvid: bv,
+          url: 'https://www.bilibili.com/video/' + bv + '?p=' + (pg.page || 1),
+          title: meta.title, pageTitle: pg.part || '', up: meta.up, lan: '', body: [],
+          createdAt: Date.now(), source: '分P信息', page: pg.page || 1, totalPages: meta.total });
         toast('P' + (pg.page || 1) + ' 取不到：' + msg);
       } else {
         search.err = '远程取不到：' + msg + '。可点下方卡片打开视频页再取。';
@@ -3958,10 +3963,24 @@
     remoteBusy = false;
     search.loading = false;
     if (meta.total > 1) {
-      // 多 P：只列出来，不自动抓——一次取一个，点哪个取哪个
       search.parts = pl.data;
+      // v9.23：默认选中「当前 P」——URL 带 ?p=n 就用它，否则 P1
+      var curP = 1;
+      if (state.bvid === bv) {
+        var mm = (location.search || '').match(/[?&]p=(\d+)/);
+        if (mm) curP = Number(mm[1]) || 1;
+      }
+      if (curP < 1) curP = 1;
+      if (curP > pl.data.length) curP = pl.data.length;
+      search.curPage = curP;
       search.direct = { bvid: bv, url: 'https://www.bilibili.com/video/' + bv, title: meta.title, up: meta.up, total: meta.total, multi: true };
       render();
+      // 默认就把当前 P 跑起来：列表已渲染，用户能看到这一行变成「已取」
+      var pg0 = null;
+      for (var pi = 0; pi < pl.data.length; pi++) {
+        if (Number(pl.data[pi].page) === curP) { pg0 = pl.data[pi]; break; }
+      }
+      if (pg0) await grabPart(bv, pg0, meta);
       return;
     }
     await grabPart(bv, pl.data[0], meta);
@@ -4337,6 +4356,8 @@
       '.bsr-histfoot{display:flex;justify-content:flex-end;padding:2px 2px 2px}' +
       '.bsr-histclear{font-size:10px;line-height:1;padding:3px 8px;border:1px solid #ececf3;border-radius:6px;background:#fff;color:#a0a0aa;cursor:pointer;font-family:inherit}' +
       '.bsr-histclear:hover{color:#c05050;border-color:#f0d0d0}' +
+      '.bsr-histlink{flex:none;display:flex;align-items:center;justify-content:center;width:28px;align-self:stretch;border:1px solid #ececf3;border-radius:6px;color:#a0a0aa;text-decoration:none;font-size:12px;line-height:1}' +
+      '.bsr-histlink:hover{color:#d94a72;border-color:#f3c2d3;background:#fff7fa}' +
       '#bsr-root[data-theme="dark"] .bsr-histtoggle{background:#242429;color:#c9c9d2}' +
       '#bsr-root[data-theme="dark"] .bsr-histtoggle.empty{color:#7b7b85}' +
       '.bsr-histbar{display:flex;align-items:center;gap:8px;margin:8px 0;padding:6px 8px;border-radius:6px;background:#fff6e5;border:1px solid #f0d9a8;font-size:11px;color:#8a6d3b}' +
@@ -4392,8 +4413,10 @@
       '.bsr-part{display:flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid #ececf3;border-radius:7px;background:#fff;cursor:pointer}' +
       '.bsr-part:hover{border-color:#f3c2d3;background:#fffafc}' +
       '.bsr-part .no{flex:none;font-size:10px;font-weight:700;color:#e2568b;min-width:22px}' +
-      '.bsr-part .tt{flex:1;min-width:0;font-size:11px;color:#444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      '.bsr-part .tt{flex:1;min-width:0;font-size:11px;color:#444;line-height:1.4;white-space:normal;word-break:break-word}' +
       '.bsr-part .du{flex:none;font-size:10px;color:#a0a0aa;font-variant-numeric:tabular-nums}' +
+      '.bsr-part.cur{border-color:#f3c2d3;background:#fffafc}' +
+      '.bsr-part .no em{display:block;font-style:normal;font-size:9px;line-height:1.2;color:#d94a72;margin-top:1px}' +
       '.bsr-partget{flex:none;font-size:11px;line-height:1;padding:4px 8px;border:1px solid #f3c2d3;border-radius:6px;background:#fff7fa;color:#d94a72;cursor:pointer;font-family:inherit}' +
       '.bsr-partget:hover{background:#ffeef4}' +
       '.bsr-partget[disabled]{opacity:.6;cursor:default}' +
@@ -4623,7 +4646,7 @@
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.22.0</span></div>' +
+      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.23.0</span></div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
       '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
       '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
@@ -5066,7 +5089,7 @@
         if (pg) grabPart(md.bvid, pg, { title: md.title, up: md.up, total: md.total });
         return;
       }
-      // v9.21.1：整行可点。未取字幕时复制「P 号 + 标题 + 链接」，取过之后复制「标题 + 字幕正文」。
+      // v9.23：整行优先「解析」：未解析点一下直接开跑；已解析点一下复制（标题 + 链接 + 正文）。
       var row = t && t.closest ? t.closest('.bsr-part') : null;
       if (row && !pb) {
         var rmd = search.direct;
@@ -5079,20 +5102,12 @@
         if (rpg) {
           var rid = search.partDone[rpn];
           var rhj = rid ? findJob(rid) : null;
-          var rurl = 'https://www.bilibili.com/video/' + rmd.bvid + '?p=' + rpn;
           if (rhj && rhj.body) {
+            var rurl = 'https://www.bilibili.com/video/' + rmd.bvid + '?p=' + rpn;
             copyText('P' + rpn + ' ' + (rpg.part || '') + '\n' + rurl + '\n\n' + bodyToTxt(rhj.body), true);
             toast('已复制 P' + rpn + ' 标题 + 字幕（' + rhj.body.length + ' 句）');
           } else {
-            copyText('P' + rpn + ' ' + (rpg.part || '') + '\n' + rurl, true);
-            toast('已复制 P' + rpn + ' 标题 + 链接');
-            // 只复制信息时也留一条轻量历史，否则「历史结果」一直空着，像坏了
-            if (!rhj) {
-              pushHistory({ id: newJobId(), bvid: rmd.bvid, url: rurl, title: rmd.title,
-                pageTitle: rpg.part || '', up: rmd.up, lan: '', body: [], createdAt: Date.now(),
-                source: '分P信息', page: rpn, totalPages: rmd.total });
-              render();   // 立刻刷新历史计数与列表，否则要等下一次 render 才看得到
-            }
+            grabPart(rmd.bvid, rpg, { title: rmd.title, up: rmd.up, total: rmd.total });
           }
           return;
         }
@@ -5367,8 +5382,9 @@
             var bad = search.partErr[p.page];
             var busy = search.partBusy === p.page;
             var done = !!search.partDone[p.page];
-            return '<div class="bsr-part' + (bad ? ' bad' : '') + (done ? ' done' : '') + '" data-page="' + p.page + '" title="点这一行：复制 P' + p.page + ' 的标题与链接">' +
-              '<span class="no">P' + p.page + '</span>' +
+            var cur = search.curPage === p.page;
+            return '<div class="bsr-part' + (bad ? ' bad' : '') + (done ? ' done' : '') + (cur ? ' cur' : '') + '" data-page="' + p.page + '" title="点这一行：未解析则开始解析，已解析则复制字幕">' +
+              '<span class="no">P' + p.page + (cur ? '<em>当前</em>' : '') + '</span>' +
               '<span class="tt" title="' + escHtml(p.part || '') + '">' + escHtml(p.part || ('P' + p.page)) + '</span>' +
               '<span class="du">' + fmtDurSec(Number(p.duration) || 0) + '</span>' +
               '<button type="button" class="bsr-partget" data-page="' + p.page + '" data-done="' + (done ? '1' : '0') + '"' + (busy ? ' disabled' : '') + '>' +
@@ -5512,6 +5528,16 @@
         }
       };
       item.appendChild(open);
+      if (h.url) {
+        var lk = document.createElement('a');
+        lk.className = 'bsr-histlink';
+        lk.href = h.url;
+        lk.target = '_blank';
+        lk.rel = 'noopener';
+        lk.textContent = '↗';
+        lk.title = '打开原视频';
+        item.appendChild(lk);
+      }
       item.appendChild(cp);
       host.appendChild(item);
     });

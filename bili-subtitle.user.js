@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         全网视频字幕提取 · AI 转写版
 // @namespace    https://github.com/huanweide/bili-subtitle
-// @version      9.21.1
+// @version      9.21.2
 // @description  在任意网页视频上悬浮按钮，一键提取字幕：B站官方字幕（WBI 签名）、YouTube 字幕、任意站点的 WebVTT 字幕；无字幕时自动 AI 语音转写（可切厂商：硅基流动 SenseVoice / OpenAI / DeepSeek / OpenRouter / 自定义 OpenAI 兼容端点，Key 与模型均可在设置里改）；解析结果留存：切换视频不再中断正在跑的转写，完成后自动归档最近 5 个视频，可逐条查看与复制；搜索页贴 BV 号/链接可「远程直取」字幕（不跳页），多 P 合集会列出每个分 P，点哪个取哪个。
 // @author       ReTri
 // @icon         https://www.bilibili.com/favicon.ico
@@ -1529,6 +1529,31 @@
   var jobQueue = [];        // 待执行 [{id, url, bvid, title, autoCopy}]
   var jobActive = null;     // 正在执行 {id, state, url, bvid, title, startedAt}
   var jobHistory = [];      // 已完成 [{id, bvid, url, title, up, lan, body, createdAt, source, page, totalPages}]
+  var JOBS_STORE = 'bsr_jobs_v1';
+  // v9.21.2：历史落盘。原来只在内存里，刷新/换页就全没了，用户会以为「历史界面不见了」。
+  function saveHistory() {
+    try {
+      if (typeof GM_setValue !== 'function') return;
+      var slim = jobHistory.map(function (h) {
+        return { id: h.id, bvid: h.bvid, url: h.url, title: h.title, pageTitle: h.pageTitle, up: h.up,
+          lan: h.lan, createdAt: h.createdAt, source: h.source, page: h.page, totalPages: h.totalPages,
+          incomplete: !!(h.body && h.body.incomplete), body: h.body };
+      });
+      GM_setValue(JOBS_STORE, JSON.stringify(slim));
+    } catch (e) { log('历史保存失败（可能超出存储上限）', e); }
+  }
+  function loadHistory() {
+    try {
+      if (typeof GM_getValue !== 'function') return;
+      var raw = GM_getValue(JOBS_STORE, '');
+      if (!raw) return;
+      var arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return;
+      arr.forEach(function (h) { if (h && h.body && h.body.length) h.body.incomplete = !!h.incomplete; });
+      jobHistory = arr.filter(function (h) { return h && h.body && h.body.length; });
+    } catch (e) { log('历史恢复失败', e); }
+  }
+  loadHistory();
   var jobSeq = 0;
   var viewingJobId = 0;     // >0 = 正在查看某条历史结果（只读视图）
   var pendingAutoBvid = ''; // v9.17：BV 直取卡片跳转后，到达该视频要自动解析
@@ -1588,6 +1613,7 @@
     }
     jobHistory.unshift(entry);
     trimHistory();
+    saveHistory();   // v9.21.2：每存一条就落盘，刷新后还在
     return entry;
   }
   function queueLength() { return jobQueue.length + (jobActive ? 1 : 0); }
@@ -4267,6 +4293,10 @@
       '.bsr-subfind .bsr-input{margin-bottom:0;flex:1;min-width:0}' +
       '.bsr-findinfo{font-size:10px;color:#7C5CBF;margin:0 0 6px;line-height:1.5}' +
       '.bsr-set{margin:8px 0 4px;font-size:12px;color:#7C5CBF;cursor:pointer;user-select:none}' +
+      '.bsr-histtoggle{background:#f7f7fb;border-radius:8px;padding:7px 10px;margin:2px 0 4px;font-size:11px;color:#666}' +
+      '.bsr-histtoggle.empty{color:#b3b3bc}' +
+      '#bsr-root[data-theme="dark"] .bsr-histtoggle{background:#242429;color:#c9c9d2}' +
+      '#bsr-root[data-theme="dark"] .bsr-histtoggle.empty{color:#7b7b85}' +
       '.bsr-histbar{display:flex;align-items:center;gap:8px;margin:8px 0;padding:6px 8px;border-radius:6px;background:#fff6e5;border:1px solid #f0d9a8;font-size:11px;color:#8a6d3b}' +
       '.bsr-histbar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
       '.bsr-hist{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto}' +
@@ -4495,6 +4525,12 @@
       '      <button type="button" class="bsr-btn bsr-c" id="bsrFindClear" style="flex:none" title="清空检索，恢复全篇">✕</button>' +
       '    </div>' +
       '    <div class="bsr-findinfo" id="bsrFindInfo" style="display:none"></div>' +
+      // v9.21.2：历史入口上移到正文之前，一打开就能看到；空态也保留这一行，不再整块消失
+      '    <div class="bsr-set bsr-histtoggle" id="bsrHistoryToggle">🗂 历史结果（<span id="bsrHistoryCount">0</span> 条 · 最多 5 个视频）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
+      '    <div class="bsr-pbox" id="bsrHistoryBox">' +
+      '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
+      '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多留 5 个视频，多 P 合集的所有 P 都算同一个视频）。刷新页面后历史也会保留。</div>' +
+      '    </div>' +
       '    <div class="bsr-ta bsr-lines" id="bsrOut" tabindex="0" title="点某一行可以跳到视频的对应时间（可在设置里关掉）"></div>' +
       '    <div class="bsr-ops" id="bsrOps" style="display:none">' +
       '      <button class="bsr-btn bsr-c" id="bsrCopy">📋 复制</button>' +
@@ -4512,11 +4548,6 @@
       '    <div class="bsr-histbar" id="bsrHistViewBar" style="display:none">' +
       '      <span id="bsrHistViewTitle">正在查看历史结果</span>' +
       '      <button class="bsr-btn bsr-t" id="bsrHistViewBack">↩ 返回当前视频</button>' +
-      '    </div>' +
-      '    <div class="bsr-set" id="bsrHistoryToggle" style="display:none">🗂 历史结果（<span id="bsrHistoryCount">0</span> 条 · 最多 5 个视频）<span id="bsrHistArrow">▸</span> · 点条目查看，右侧复制</div>' +
-      '    <div class="bsr-pbox" id="bsrHistoryBox">' +
-      '      <div class="bsr-hist" id="bsrHistoryList"></div>' +
-      '      <div class="bsr-wtip">切换视频不会中断解析：正在跑的任务会转入后台继续，完成后自动存到这里（最多留 5 个视频，多 P 合集的所有 P 都算同一个视频）。</div>' +
       '    </div>' +
       '    <div class="bsr-set" id="bsrAxisToggle">⏱ 时间轴（对不上就整体挪 · 只导出后半段）</div>' +
       '    <div class="bsr-pbox" id="bsrAxisBox">' +
@@ -4548,7 +4579,7 @@
       '      <div class="bsr-st" id="bsrSearchStatus"></div>' +
       '      <div id="bsrSearchResults"></div>' +
       '    </div>' +
-      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.1</span></div>' +
+      '    <div class="bsr-set" id="bsrSetToggle">⚙ 设置（AI 转写 / 翻译）<span style="float:right;font-weight:400;color:#b0b0ba;font-size:11px">v9.21.2</span></div>' +
       '    <div class="bsr-setbox" id="bsrSetBox">' +
       '      <div class="bsr-set" style="margin-top:0">▍第一步 · 配置 AI（只有「无字幕要转写」或「要翻译」时才需要）</div>' +
       '      <div class="bsr-model-note">视频自带字幕时，不用 Key 也能取。这里是给「没有字幕、要 AI 听音频转文字」准备的。</div>' +
@@ -5313,14 +5344,12 @@
     var toggle = $('#bsrHistoryToggle');
     var box = $('#bsrHistoryBox');
     if (!toggle) return;
-    if (jobHistory.length) {
-      toggle.style.display = 'block';
-      var c = $('#bsrHistoryCount');
-      if (c) c.textContent = jobHistory.length;
-    } else {
-      toggle.style.display = 'none';
-      if (box) box.classList.remove('show');
-    }
+    // v9.21.2：入口常驻，空态也显示这一行——整块消失会让用户以为「历史结果界面没了」
+    toggle.style.display = 'block';
+    toggle.classList.toggle('empty', !jobHistory.length);
+    var c = $('#bsrHistoryCount');
+    if (c) c.textContent = jobHistory.length;
+    if (!jobHistory.length && box) box.classList.remove('show');
     var bar = $('#bsrHistViewBar');
     var ar = $('#bsrHistArrow');
     if (ar && box) ar.textContent = box.classList.contains('show') ? '▾' : '▸';
@@ -5349,6 +5378,10 @@
   function renderHistoryList() {
     var host = root && root.querySelector('#bsrHistoryList');
     if (!host) return;
+    if (!jobHistory.length) {
+      host.innerHTML = '<div class="bsr-empty">还没有历史结果。解析（或远程直取）完一个视频会自动存到这里，最多 5 个视频，刷新后也还在。</div>';
+      return;
+    }
     var oldTop = host.scrollTop;   // 重建时保留滚动位置，避免每次 render 跳回顶部
     host.innerHTML = '';
     jobHistory.forEach(function (h) {

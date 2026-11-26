@@ -16,7 +16,7 @@
 </p>
 
 [![CI](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml/badge.svg)](https://github.com/huanweide/bili-subtitle-universal/actions/workflows/test.yml)
-[![version](https://img.shields.io/badge/version-9.21.1-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
+[![version](https://img.shields.io/badge/version-9.21.2-FB7299)](https://github.com/huanweide/bili-subtitle-universal)
 [![license](https://img.shields.io/badge/license-MIT-4ecca3)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-86%2F86-3a8ee6)](tests/run-tests.js)
 [![userscript](https://img.shields.io/badge/Tampermonkey-Edge%20%7C%20Chrome%20%7C%20Firefox-7C5CBF)](https://www.tampermonkey.net/)
@@ -196,7 +196,7 @@ node tests/check-docs.js             # 版本号 / 测试数不得漂移
 结果：86 通过，0 失败
 ----------------------------------------
 PASS 89 条（全部通过）
-结果：全部一致（版本 9.21.1 · 用例 86）
+结果：全部一致（版本 9.21.2 · 用例 86）
 ```
 
 ---
